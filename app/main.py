@@ -1,18 +1,15 @@
-DOG_NAME = "Fast Fred"
+from database import connect_database
+from database import create_tables
 
-INITIALPRICE = 4.60
 
-CURRENTPRICE = 10.80
+print("===========================")
+print(" Greyhound Price Monitor")
+print("===========================")
 
-if INITIALPRICE < 5 and CURRENTPRICE > 10:
+database = connect_database()
 
-    print("********************************")
-    print("ALERT")
-    print(DOG_NAME)
-    print("Initial:", INITIALPRICE)
-    print("Current:", CURRENTPRICE)
-    print("********************************")
+create_tables(database)
 
-else:
+database.close()
 
-    print("No alert")
+print("Database closed.")
