@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Virtual Environment
+.venv/
+
+# SQLite
+*.db
+*.sqlite
+
+# Logs
+logs/
+*.log
+
+# VS Code
+.vscode/
+
+# Environment Variables
+.env
+
+# Power BI backups
+*.pbix.autosave
