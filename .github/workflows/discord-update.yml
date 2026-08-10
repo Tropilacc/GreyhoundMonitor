@@ -26,7 +26,7 @@ jobs:
             --arg repo "$REPOSITORY" \
             --arg actor "$ACTOR" \
             '{
-              username: "Greyhound Tracker - Updates",
+              username: "ℹ️ Information ℹ️",
               content: (
                 "@everyone\n\n" +
                 "🛠️ **GREYHOUND TRACKER UPDATED** 🛠️\n\n" +
