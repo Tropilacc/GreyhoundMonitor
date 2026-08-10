@@ -140,6 +140,46 @@ def heavy_shortening_condition(
 
 
 # ============================================================
+# ALERT 4 — EXTREME PRICE MOVE
+#
+# Initial price < $30.00
+# Absolute price movement > $20.00
+#
+# Movement may be either:
+# - Up / drifting
+# - Down / shortening
+# ============================================================
+
+EXTREME_PRICE_MOVE_INITIAL_MAX = 30.00
+EXTREME_PRICE_MOVE_MIN = 20.00
+
+
+def extreme_price_move_condition(
+    runner: Runner
+) -> bool:
+    """
+    Trigger when ALL conditions are met:
+
+    - Initial price is below $30.00
+    - Price has moved by MORE than $20.00
+    - Movement can be either up or down
+    """
+
+    price_movement = abs(
+        runner.current_price
+        - runner.initial_price
+    )
+
+    return (
+        runner.initial_price
+        < EXTREME_PRICE_MOVE_INITIAL_MAX
+
+        and price_movement
+        > EXTREME_PRICE_MOVE_MIN
+    )
+
+
+# ============================================================
 # ACTIVE ALERTS
 #
 # This is the central list of active alert rules.
@@ -213,6 +253,29 @@ ALERTS = (
             "DISCORD_HEAVY_SHORTENING_ROLE_ID"
         ),
         condition=heavy_shortening_condition,
+    ),
+
+    AlertRule(
+        id="extreme_price_move",
+        name="Extreme Price Move",
+        emoji="💥",
+        parameters=(
+            (
+                f"Initial Price: "
+                f"Below ${EXTREME_PRICE_MOVE_INITIAL_MAX:.2f}"
+            ),
+            (
+                f"Price Movement: "
+                f"More than ${EXTREME_PRICE_MOVE_MIN:.2f}"
+            ),
+            (
+                "Direction: Either up or down"
+            ),
+        ),
+        role_env_name=(
+            "DISCORD_EXTREME_PRICE_MOVE_ROLE_ID"
+        ),
+        condition=extreme_price_move_condition,
     ),
 )
 
