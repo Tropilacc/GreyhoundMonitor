@@ -12,7 +12,7 @@ jobs:
     steps:
       - name: Send Discord update notification
         env:
-          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          DISCORD_GIT_WEBHOOK_URL: ${{ secrets.DISCORD_GIT_WEBHOOK_URL }}
           COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
           COMMIT_SHA: ${{ github.sha }}
           REPOSITORY: ${{ github.repository }}
@@ -47,4 +47,4 @@ jobs:
             --show-error \
             -H "Content-Type: application/json" \
             -d "$PAYLOAD" \
-            "$DISCORD_WEBHOOK_URL"
+            "$DISCORD_GIT_WEBHOOK_URL"
