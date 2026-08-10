@@ -52,17 +52,16 @@ def create_tables(
     connection: sqlite3.Connection
 ) -> None:
     """
-    Create and upgrade the database tables.
+    Create and upgrade all tracker database tables.
 
     RUNNERS:
-        Stores runner details, scheduled race start,
-        and price information.
+        Stores runner details, race metadata and prices.
 
     ALERT_HISTORY:
-        Stores alert events, trigger prices,
-        finishing positions, and result-check status.
+        Stores each price alert that fired.
 
-    Existing databases are upgraded automatically.
+    REMINDER_HISTORY:
+        Stores one pre-race reminder per race.
     """
 
     cursor = connection.cursor()
@@ -89,8 +88,6 @@ def create_tables(
     )
 
     connection.commit()
-
-    # Upgrade older RUNNERS tables without deleting data.
 
     if not column_exists(
         connection,
@@ -142,8 +139,6 @@ def create_tables(
 
     connection.commit()
 
-    # Upgrade older ALERT_HISTORY tables.
-
     if not column_exists(
         connection,
         "ALERT_HISTORY",
@@ -183,8 +178,26 @@ def create_tables(
 
     connection.commit()
 
+    # ========================================================
+    # REMINDER HISTORY
+    #
+    # One record per RACE, not per runner.
+    # ========================================================
+
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS REMINDER_HISTORY (
+            RACEID TEXT PRIMARY KEY,
+            SENTAT TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+        """
+    )
+
+    connection.commit()
+
     print("RUNNERS table ready.")
     print("ALERT_HISTORY table ready.")
+    print("REMINDER_HISTORY table ready.")
 
 
 def save_runner(
@@ -194,13 +207,8 @@ def save_runner(
     """
     Insert or update a runner.
 
-    When first seen:
-        INITIALPRICE = first observed price.
-
-    On subsequent checks:
-        INITIALPRICE remains unchanged.
-        CURRENTPRICE is updated.
-        Race/runner metadata is refreshed.
+    INITIALPRICE remains the first observed price.
+    CURRENTPRICE is updated on later checks.
     """
 
     cursor = connection.cursor()
@@ -253,7 +261,7 @@ def get_runner(
     runner_id: str
 ) -> Runner | None:
     """
-    Load one runner from the database.
+    Load one runner from SQLite.
     """
 
     cursor = connection.cursor()
@@ -304,7 +312,7 @@ def has_alert_been_sent(
     alert_id: str
 ) -> bool:
     """
-    Check whether this specific alert has already
+    Return True if this alert has already
     been sent for this runner.
     """
 
@@ -324,10 +332,7 @@ def has_alert_been_sent(
         )
     )
 
-    return (
-        cursor.fetchone()
-        is not None
-    )
+    return cursor.fetchone() is not None
 
 
 def mark_alert_as_sent(
@@ -337,10 +342,7 @@ def mark_alert_as_sent(
     alert_price: float
 ) -> None:
     """
-    Record a successfully sent alert.
-
-    ALERTPRICE stores the exact price observed
-    when the alert triggered.
+    Record a successfully sent price alert.
     """
 
     cursor = connection.cursor()
@@ -358,6 +360,143 @@ def mark_alert_as_sent(
             runner_id,
             alert_id,
             alert_price
+        )
+    )
+
+    connection.commit()
+
+
+def get_alerted_runners_for_race(
+    connection: sqlite3.Connection,
+    meeting_date: str,
+    venue_code: str,
+    race_number: int
+) -> list[dict]:
+    """
+    Return every runner in this race that has triggered
+    at least one alert.
+
+    Also returns the alert IDs and alert prices that
+    were recorded for the runner.
+    """
+
+    cursor = connection.cursor()
+
+    cursor.execute(
+        """
+        SELECT
+            R.RUNNERID,
+            R.MEETINGDATE,
+            R.MEETINGNAME,
+            R.VENUECODE,
+            R.RACENUMBER,
+            R.RACESTART,
+            R.RUNNERNUMBER,
+            R.RUNNERNAME,
+            R.INITIALPRICE,
+            R.CURRENTPRICE,
+            A.ALERTID,
+            A.ALERTPRICE
+        FROM RUNNERS R
+
+        INNER JOIN ALERT_HISTORY A
+            ON A.RUNNERID = R.RUNNERID
+
+        WHERE
+            R.MEETINGDATE = ?
+            AND R.VENUECODE = ?
+            AND R.RACENUMBER = ?
+
+        ORDER BY
+            R.RUNNERNUMBER,
+            A.SENTAT;
+        """,
+        (
+            meeting_date,
+            venue_code,
+            race_number
+        )
+    )
+
+    rows = cursor.fetchall()
+
+    runners = {}
+
+    for row in rows:
+        runner_id = row[0]
+
+        if runner_id not in runners:
+            runners[runner_id] = {
+                "runner_id": row[0],
+                "meeting_date": row[1],
+                "meeting_name": row[2] or "",
+                "venue_code": row[3],
+                "race_number": row[4],
+                "race_start": row[5] or "",
+                "runner_number": row[6],
+                "runner_name": row[7],
+                "initial_price": row[8],
+                "current_price": row[9],
+                "alerts": []
+            }
+
+        runners[runner_id]["alerts"].append(
+            {
+                "alert_id": row[10],
+                "alert_price": row[11]
+            }
+        )
+
+    return list(
+        runners.values()
+    )
+
+
+def has_race_reminder_been_sent(
+    connection: sqlite3.Connection,
+    race_id: str
+) -> bool:
+    """
+    Return True if this race has already received
+    its pre-race Discord reminder.
+    """
+
+    cursor = connection.cursor()
+
+    cursor.execute(
+        """
+        SELECT 1
+        FROM REMINDER_HISTORY
+        WHERE RACEID = ?
+        LIMIT 1;
+        """,
+        (
+            race_id,
+        )
+    )
+
+    return cursor.fetchone() is not None
+
+
+def mark_race_reminder_as_sent(
+    connection: sqlite3.Connection,
+    race_id: str
+) -> None:
+    """
+    Record that the race reminder was successfully sent.
+    """
+
+    cursor = connection.cursor()
+
+    cursor.execute(
+        """
+        INSERT OR IGNORE INTO REMINDER_HISTORY (
+            RACEID
+        )
+        VALUES (?);
+        """,
+        (
+            race_id,
         )
     )
 
@@ -398,10 +537,7 @@ def mark_result_checked(
     runner_id: str
 ) -> None:
     """
-    Mark the runner's alert result as processed.
-
-    FINISHPOSITION remains NULL when the runner
-    was not in the published placing block.
+    Mark an alerted runner's result as processed.
     """
 
     cursor = connection.cursor()
@@ -424,11 +560,8 @@ def get_unchecked_alert_runners(
     connection: sqlite3.Connection
 ) -> list[dict]:
     """
-    Return alerted runners whose race result
-    has not yet been processed.
-
-    DISTINCT prevents runners that triggered
-    multiple alert types from appearing more than once.
+    Return alerted runners whose result has not
+    yet been processed.
     """
 
     cursor = connection.cursor()

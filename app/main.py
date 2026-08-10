@@ -4,17 +4,15 @@ from datetime import datetime
 from browser_session import BrowserSession
 from heartbeat import send_heartbeat
 from monitor import monitor_race
-from notifications import send_startup_notification
 from race_finder import get_todays_greyhound_races
+from reminders import check_race_reminders
 from results_monitor import check_unprocessed_results
 
 
 MAIN_LOOP_SECONDS = 30
 
-# Result checks run at most once per minute.
 RESULT_CHECK_INTERVAL_SECONDS = 60
 
-# StatusCake heartbeat is sent every 5 minutes.
 HEARTBEAT_INTERVAL_SECONDS = 5 * 60
 
 
@@ -22,19 +20,18 @@ def get_poll_interval(
     minutes_to_start: float
 ) -> int:
     """
-    Return how often a race should be checked,
-    based on its scheduled start time.
+    Return how often a race should be checked.
 
-    60-180 minutes away:
+    60-180 min:
         every 10 minutes
 
-    30-60 minutes away:
+    30-60 min:
         every 5 minutes
 
-    10-30 minutes away:
+    10-30 min:
         every 2 minutes
 
-    -5 to 10 minutes:
+    -5 to 10 min:
         every 1 minute
     """
 
@@ -54,7 +51,7 @@ def get_race_key(
     race: dict
 ) -> str:
     """
-    Create a unique key for each race.
+    Create a unique race key.
     """
 
     return (
@@ -68,7 +65,7 @@ def parse_race_start(
     race: dict
 ) -> datetime:
     """
-    Convert race_start into a datetime.
+    Convert race_start into datetime.
     """
 
     return datetime.strptime(
@@ -79,25 +76,21 @@ def parse_race_start(
 
 def run_monitor() -> None:
     """
-    Run the Greyhound Price Monitor.
+    Run GreyhoundMonitor.
 
     PRICE MONITORING:
-        Begins when a race is within 3 hours.
-        Continues until 5 minutes after scheduled start.
+        -3 hours through +5 minutes.
+
+    PRE-RACE REMINDER:
+        One Discord reminder per race when an
+        alerted runner is due to run within
+        approximately 2 minutes.
 
     RESULT MONITORING:
-        Only applies to runners that generated alerts.
-        Begins 20 minutes after scheduled race start.
-        Retries until TAB publishes an official result.
+        Begins at +20 minutes for alerted runners.
 
     STATUSCAKE:
-        Sends a heartbeat approximately every 5 minutes
-        while the tracker is still progressing through
-        the main loop.
-
-    STARTUP:
-        Polling history starts fresh every time
-        the program is launched.
+        Heartbeat approximately every 5 minutes.
     """
 
     print()
@@ -109,46 +102,19 @@ def run_monitor() -> None:
     print()
 
     # ========================================================
-    # STARTUP DISCORD NOTIFICATION
-    #
-    # Runs once per program launch.
-    # ========================================================
-
-    try:
-        send_startup_notification()
-
-        print(
-            "Startup Discord notification sent."
-        )
-
-    except Exception as error:
-        print(
-            f"ERROR sending startup "
-            f"Discord notification: {error}"
-        )
-
-    print()
-
-    # ========================================================
-    # PRICE POLLING HISTORY
-    #
-    # Kept only in memory.
-    # Restarting the tracker starts fresh.
+    # IN-MEMORY PRICE POLLING HISTORY
     # ========================================================
 
     last_checked = {}
 
     # ========================================================
-    # RESULT CHECK TIMER
+    # RESULT TIMER
     # ========================================================
 
     last_result_check = 0.0
 
     # ========================================================
-    # STATUSCAKE HEARTBEAT TIMER
-    #
-    # Start at zero so the first successful loop can send
-    # a heartbeat immediately.
+    # STATUSCAKE TIMER
     # ========================================================
 
     last_heartbeat = 0.0
@@ -158,7 +124,7 @@ def run_monitor() -> None:
             now = datetime.now()
 
             # =================================================
-            # FIND ELIGIBLE GREYHOUND RACES
+            # DISCOVER RACES
             # =================================================
 
             races = (
@@ -170,6 +136,21 @@ def run_monitor() -> None:
             )
 
             races_checked_this_cycle = 0
+
+            # =================================================
+            # PRE-RACE REMINDERS
+            # =================================================
+
+            try:
+                check_race_reminders(
+                    races
+                )
+
+            except Exception as error:
+                print(
+                    f"ERROR checking race reminders: "
+                    f"{error}"
+                )
 
             # =================================================
             # PRICE MONITORING
@@ -186,13 +167,9 @@ def run_monitor() -> None:
                     race_start - now
                 ).total_seconds() / 60
 
-                # Stop price monitoring more than
-                # 5 minutes after scheduled start.
                 if minutes_to_start < -5:
                     continue
 
-                # Don't monitor prices more than
-                # 3 hours before scheduled start.
                 if minutes_to_start > 180:
                     continue
 
@@ -297,7 +274,7 @@ def run_monitor() -> None:
                     browser_session.close()
 
             # =================================================
-            # CLEAN OLD PRICE-POLLING KEYS
+            # CLEAN OLD POLLING KEYS
             # =================================================
 
             active_race_keys = {
@@ -307,10 +284,8 @@ def run_monitor() -> None:
 
             expired_keys = [
                 race_key
-                for race_key
-                in last_checked
-                if race_key
-                not in active_race_keys
+                for race_key in last_checked
+                if race_key not in active_race_keys
             ]
 
             for race_key in expired_keys:
@@ -352,12 +327,6 @@ def run_monitor() -> None:
 
             # =================================================
             # STATUSCAKE HEARTBEAT
-            #
-            # Send only after the loop has progressed through
-            # race discovery / monitoring / result handling.
-            #
-            # If the program crashes or hangs before this point,
-            # StatusCake eventually stops receiving heartbeats.
             # =================================================
 
             current_monotonic = (
