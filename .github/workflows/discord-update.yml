@@ -1,0 +1,46 @@
+name: Discord Update Notification
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  notify-discord:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Send Discord update notification
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
+          COMMIT_SHA: ${{ github.sha }}
+          REPOSITORY: ${{ github.repository }}
+          ACTOR: ${{ github.actor }}
+        run: |
+          SHORT_SHA="${COMMIT_SHA:0:7}"
+
+          PAYLOAD=$(jq -n \
+            --arg message "$COMMIT_MESSAGE" \
+            --arg sha "$SHORT_SHA" \
+            --arg repo "$REPOSITORY" \
+            --arg actor "$ACTOR" \
+            '{
+              username: "Greyhound Tracker - Updates",
+              content: (
+                "🛠️ **GREYHOUND TRACKER UPDATED** 🛠️\n\n" +
+                "**Update:** " + $message + "\n" +
+                "**Commit:** `" + $sha + "`\n" +
+                "**Repository:** " + $repo + "\n" +
+                "**Updated by:** " + $actor + "\n\n" +
+                "A new version of Greyhound Tracker has been published to GitHub."
+              )
+            }')
+
+          curl \
+            --fail \
+            --silent \
+            --show-error \
+            -H "Content-Type: application/json" \
+            -d "$PAYLOAD" \
+            "$DISCORD_WEBHOOK_URL"
