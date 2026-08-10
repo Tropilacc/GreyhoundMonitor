@@ -2,6 +2,7 @@ import time
 from datetime import datetime
 
 from browser_session import BrowserSession
+from heartbeat import send_heartbeat
 from monitor import monitor_race
 from notifications import send_startup_notification
 from race_finder import get_todays_greyhound_races
@@ -10,9 +11,11 @@ from results_monitor import check_unprocessed_results
 
 MAIN_LOOP_SECONDS = 30
 
-# Don't run the result checker every 30 seconds.
-# Once per minute is sufficient.
+# Result checks run at most once per minute.
 RESULT_CHECK_INTERVAL_SECONDS = 60
+
+# StatusCake heartbeat is sent every 5 minutes.
+HEARTBEAT_INTERVAL_SECONDS = 5 * 60
 
 
 def get_poll_interval(
@@ -87,6 +90,11 @@ def run_monitor() -> None:
         Begins 20 minutes after scheduled race start.
         Retries until TAB publishes an official result.
 
+    STATUSCAKE:
+        Sends a heartbeat approximately every 5 minutes
+        while the tracker is still progressing through
+        the main loop.
+
     STARTUP:
         Polling history starts fresh every time
         the program is launched.
@@ -103,7 +111,7 @@ def run_monitor() -> None:
     # ========================================================
     # STARTUP DISCORD NOTIFICATION
     #
-    # This runs ONCE per program launch.
+    # Runs once per program launch.
     # ========================================================
 
     try:
@@ -125,24 +133,25 @@ def run_monitor() -> None:
     # PRICE POLLING HISTORY
     #
     # Kept only in memory.
-    #
-    # Restarting the tracker resets this, which means
-    # eligible races are checked immediately again.
+    # Restarting the tracker starts fresh.
     # ========================================================
 
     last_checked = {}
 
     # ========================================================
     # RESULT CHECK TIMER
-    #
-    # Start at zero so pending results are evaluated
-    # immediately when the tracker launches.
-    #
-    # results_monitor.py itself enforces the +20-minute
-    # scheduled-start rule.
     # ========================================================
 
     last_result_check = 0.0
+
+    # ========================================================
+    # STATUSCAKE HEARTBEAT TIMER
+    #
+    # Start at zero so the first successful loop can send
+    # a heartbeat immediately.
+    # ========================================================
+
+    last_heartbeat = 0.0
 
     while True:
         try:
@@ -177,19 +186,13 @@ def run_monitor() -> None:
                     race_start - now
                 ).total_seconds() / 60
 
-                # --------------------------------------------
-                # Stop price monitoring once the race is
-                # more than 5 minutes past scheduled start.
-                # --------------------------------------------
-
+                # Stop price monitoring more than
+                # 5 minutes after scheduled start.
                 if minutes_to_start < -5:
                     continue
 
-                # --------------------------------------------
                 # Don't monitor prices more than
                 # 3 hours before scheduled start.
-                # --------------------------------------------
-
                 if minutes_to_start > 180:
                     continue
 
@@ -222,10 +225,6 @@ def run_monitor() -> None:
                         < poll_interval
                     ):
                         continue
-
-                # --------------------------------------------
-                # Console timing description
-                # --------------------------------------------
 
                 if minutes_to_start >= 0:
                     timing_text = (
@@ -321,16 +320,6 @@ def run_monitor() -> None:
 
             # =================================================
             # RESULT MONITORING
-            #
-            # Only alerted runners are considered.
-            #
-            # results_monitor.py checks RACESTART and will
-            # refuse to scrape a result until:
-            #
-            # scheduled start + 20 minutes
-            #
-            # If TAB has not published a result yet, the
-            # runner remains pending and will be retried.
             # =================================================
 
             current_monotonic = (
@@ -359,6 +348,46 @@ def run_monitor() -> None:
                 finally:
                     last_result_check = (
                         time.monotonic()
+                    )
+
+            # =================================================
+            # STATUSCAKE HEARTBEAT
+            #
+            # Send only after the loop has progressed through
+            # race discovery / monitoring / result handling.
+            #
+            # If the program crashes or hangs before this point,
+            # StatusCake eventually stops receiving heartbeats.
+            # =================================================
+
+            current_monotonic = (
+                time.monotonic()
+            )
+
+            seconds_since_heartbeat = (
+                current_monotonic
+                - last_heartbeat
+            )
+
+            if (
+                seconds_since_heartbeat
+                >= HEARTBEAT_INTERVAL_SECONDS
+            ):
+                try:
+                    send_heartbeat()
+
+                    print(
+                        "StatusCake heartbeat sent."
+                    )
+
+                    last_heartbeat = (
+                        time.monotonic()
+                    )
+
+                except Exception as error:
+                    print(
+                        f"ERROR sending StatusCake "
+                        f"heartbeat: {error}"
                     )
 
             # =================================================
