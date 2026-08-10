@@ -13,6 +13,7 @@ jobs:
       - name: Send Discord update notification
         env:
           DISCORD_GIT_WEBHOOK_URL: ${{ secrets.DISCORD_GIT_WEBHOOK_URL }}
+          DISCORD_UPDATES_ROLE_ID: ${{ secrets.DISCORD_UPDATES_ROLE_ID }}
           COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
           COMMIT_SHA: ${{ github.sha }}
           REPOSITORY: ${{ github.repository }}
@@ -25,10 +26,11 @@ jobs:
             --arg sha "$SHORT_SHA" \
             --arg repo "$REPOSITORY" \
             --arg actor "$ACTOR" \
+            --arg role_id "$DISCORD_UPDATES_ROLE_ID" \
             '{
               username: "📢 Information 📢",
               content: (
-                "@everyone\n\n" +
+                "<@&" + $role_id + ">\n\n" +
                 "🛠️ **GREYHOUND TRACKER UPDATED** 🛠️\n\n" +
                 "**Update:** " + $message + "\n" +
                 "**Commit:** `" + $sha + "`\n" +
@@ -37,7 +39,7 @@ jobs:
                 "A new version of Greyhound Tracker has been published to GitHub."
               ),
               allowed_mentions: {
-                parse: ["everyone"]
+                roles: [$role_id]
               }
             }')
 
