@@ -52,13 +52,13 @@ def format_start_time(
     race_start: str
 ) -> str:
     """
-    Convert stored scheduled start into a
+    Convert the stored race start into a
     friendly 12-hour clock time.
 
     Example:
-        2026-08-10 15:42
+        2026-08-10 16:30
         becomes
-        3:42 PM
+        4:30 PM
     """
 
     try:
@@ -75,6 +75,28 @@ def format_start_time(
         return race_start
 
 
+def format_minutes_to_start(
+    minutes_to_start: float
+) -> str:
+    """
+    Format the approximate time remaining.
+
+    Examples:
+        1 minute
+        2 minutes
+    """
+
+    rounded_minutes = max(
+        1,
+        round(minutes_to_start)
+    )
+
+    if rounded_minutes == 1:
+        return "1 minute"
+
+    return f"{rounded_minutes} minutes"
+
+
 def build_reminder_message(
     race: dict,
     alerted_runners: list[dict],
@@ -87,6 +109,12 @@ def build_reminder_message(
 
     start_time_text = format_start_time(
         race["race_start"]
+    )
+
+    time_remaining_text = (
+        format_minutes_to_start(
+            minutes_to_start
+        )
     )
 
     runner_sections = []
@@ -105,17 +133,17 @@ def build_reminder_message(
 
             if alert_price is not None:
                 alert_lines.append(
-                    f"{alert_name} "
-                    f"@ ${alert_price:.2f}"
+                    f"• {alert_name} — "
+                    f"Triggered at "
+                    f"**${alert_price:.2f}**"
                 )
             else:
                 alert_lines.append(
-                    alert_name
+                    f"• {alert_name}"
                 )
 
         triggered_text = "\n".join(
-            f"• {line}"
-            for line in alert_lines
+            alert_lines
         )
 
         runner_section = (
@@ -143,7 +171,7 @@ def build_reminder_message(
         f"Scheduled Start: "
         f"**{start_time_text}**\n"
         f"Starts in approximately "
-        f"**{max(1, round(minutes_to_start))} minute(s)**\n\n"
+        f"**{time_remaining_text}**\n\n"
         f"**Alerted Runners**\n\n"
         f"{runners_text}"
     )
@@ -153,12 +181,13 @@ def check_race_reminders(
     races: list[dict]
 ) -> None:
     """
-    Check the currently eligible races.
+    Check currently eligible races.
 
-    If a race is 2 minutes or less from scheduled start,
-    and at least one runner has previously generated an
-    alert, send ONE Discord reminder containing all
-    alerted runners.
+    If a race is two minutes or less from its
+    scheduled start and at least one runner has
+    previously generated an alert, send one
+    Discord reminder containing all alerted
+    runners.
 
     Only one reminder is sent per race.
     """
@@ -186,12 +215,13 @@ def check_race_reminders(
                 race_start - now
             ).total_seconds() / 60
 
-            # Only trigger while the scheduled start
-            # is still in the future.
+            # Race has already reached its
+            # scheduled start.
             if minutes_to_start <= 0:
                 continue
 
-            # Only trigger inside the 2-minute window.
+            # Race is not yet inside the
+            # reminder window.
             if (
                 minutes_to_start
                 > REMINDER_WINDOW_MINUTES
@@ -245,6 +275,8 @@ def check_race_reminders(
                     message
                 )
 
+                # Only mark the reminder as sent
+                # after Discord accepts it.
                 mark_race_reminder_as_sent(
                     database,
                     race_id
