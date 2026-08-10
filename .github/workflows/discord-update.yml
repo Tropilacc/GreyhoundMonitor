@@ -28,13 +28,17 @@ jobs:
             '{
               username: "Greyhound Tracker - Updates",
               content: (
+                "@everyone\n\n" +
                 "🛠️ **GREYHOUND TRACKER UPDATED** 🛠️\n\n" +
                 "**Update:** " + $message + "\n" +
                 "**Commit:** `" + $sha + "`\n" +
                 "**Repository:** " + $repo + "\n" +
                 "**Updated by:** " + $actor + "\n\n" +
                 "A new version of Greyhound Tracker has been published to GitHub."
-              )
+              ),
+              allowed_mentions: {
+                parse: ["everyone"]
+              }
             }')
 
           curl \
