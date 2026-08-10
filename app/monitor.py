@@ -10,7 +10,11 @@ from database import (
     save_runner,
 )
 from models import Runner
-from notifications import send_discord_message
+from notifications import (
+    get_all_alerts_role_id,
+    get_role_id,
+    send_discord_message,
+)
 from scraper import get_race_prices
 
 
@@ -111,6 +115,8 @@ def monitor_race(
     - Stores the scheduled race start.
     - Evaluates every active alert rule.
     - Sends qualifying Discord alerts.
+    - Pings ALL Alerts subscribers.
+    - Pings the role subscribed to the specific alert.
     - Stores the exact price at which each alert fired.
     """
 
@@ -120,13 +126,17 @@ def monitor_race(
     )
 
     if not scraped_runners:
-        print("No runner prices found.")
+        print(
+            "No runner prices found."
+        )
         return
 
     database = connect_database()
 
     try:
-        create_tables(database)
+        create_tables(
+            database
+        )
 
         for scraped_runner in scraped_runners:
             current_price = scraped_runner[
@@ -146,18 +156,6 @@ def monitor_race(
                 race_number=race_number,
                 runner_number=runner_number
             )
-
-            # ==================================================
-            # RUNNER
-            #
-            # The first observed price becomes INITIALPRICE.
-            #
-            # On later observations, save_runner() preserves
-            # INITIALPRICE and updates CURRENTPRICE.
-            #
-            # RACESTART is also stored so the result checker
-            # knows exactly when +20 minutes occurs.
-            # ==================================================
 
             runner = Runner(
                 runner_id=runner_id,
@@ -203,21 +201,18 @@ def monitor_race(
             #
             # Every active rule in alerts.py is evaluated.
             #
-            # This means adding/removing/editing an alert
-            # normally only requires changing alerts.py.
+            # Every price alert pings:
+            #
+            # 1. ALL Alerts role
+            # 2. The role assigned to this specific alert
             # ==================================================
 
             for alert in ALERTS:
-
-                # Runner does not currently meet
-                # this alert's conditions.
                 if not alert.condition(
                     stored_runner
                 ):
                     continue
 
-                # This exact alert has already been sent
-                # for this exact runner.
                 if has_alert_been_sent(
                     database,
                     stored_runner.runner_id,
@@ -259,15 +254,26 @@ def monitor_race(
                         alert
                     )
 
-                    send_discord_message(
-                        message
+                    all_alerts_role_id = (
+                        get_all_alerts_role_id()
                     )
 
-                    # Record the alert only after Discord
-                    # successfully accepts the notification.
-                    #
-                    # ALERTPRICE preserves the exact price
-                    # observed when the alert fired.
+                    specific_alert_role_id = (
+                        get_role_id(
+                            alert.role_env_name
+                        )
+                    )
+
+                    send_discord_message(
+                        message,
+                        role_ids=[
+                            all_alerts_role_id,
+                            specific_alert_role_id
+                        ]
+                    )
+
+                    # Record only after Discord accepts
+                    # the notification.
                     mark_alert_as_sent(
                         database,
                         stored_runner.runner_id,
@@ -290,9 +296,12 @@ def monitor_race(
                 print(
                     "*****************************"
                 )
+
                 print()
 
     finally:
         database.close()
 
-        print("Database closed.")
+        print(
+            "Database closed."
+        )

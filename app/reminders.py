@@ -1,6 +1,9 @@
 from datetime import datetime
 
-from alerts import ALERTS
+from alerts import (
+    ALERTS,
+    get_alert_by_id,
+)
 from database import (
     connect_database,
     create_tables,
@@ -8,7 +11,11 @@ from database import (
     has_race_reminder_been_sent,
     mark_race_reminder_as_sent,
 )
-from notifications import send_discord_message
+from notifications import (
+    get_all_alerts_role_id,
+    get_role_id,
+    send_discord_message,
+)
 
 
 REMINDER_WINDOW_MINUTES = 2
@@ -38,14 +45,17 @@ def get_alert_display(
     configured emoji and display name.
     """
 
-    for alert in ALERTS:
-        if alert.id == alert_id:
-            return (
-                f"{alert.emoji} "
-                f"{alert.name}"
-            )
+    alert = get_alert_by_id(
+        alert_id
+    )
 
-    return alert_id
+    if alert is None:
+        return alert_id
+
+    return (
+        f"{alert.emoji} "
+        f"{alert.name}"
+    )
 
 
 def format_start_time(
@@ -94,7 +104,53 @@ def format_minutes_to_start(
     if rounded_minutes == 1:
         return "1 minute"
 
-    return f"{rounded_minutes} minutes"
+    return (
+        f"{rounded_minutes} minutes"
+    )
+
+
+def get_reminder_role_ids(
+    alerted_runners: list[dict]
+) -> list[str]:
+    """
+    Build the Discord role list for one race reminder.
+
+    Every reminder pings:
+        - ALL Alerts
+
+    It also pings each specific alert role represented
+    by at least one alerted runner in the race.
+
+    Duplicate roles are removed.
+    """
+
+    role_ids = [
+        get_all_alerts_role_id()
+    ]
+
+    for runner in alerted_runners:
+        for alert_data in runner[
+            "alerts"
+        ]:
+            alert = get_alert_by_id(
+                alert_data[
+                    "alert_id"
+                ]
+            )
+
+            if alert is None:
+                continue
+
+            role_id = get_role_id(
+                alert.role_env_name
+            )
+
+            if role_id not in role_ids:
+                role_ids.append(
+                    role_id
+                )
+
+    return role_ids
 
 
 def build_reminder_message(
@@ -122,9 +178,13 @@ def build_reminder_message(
     for runner in alerted_runners:
         alert_lines = []
 
-        for alert_data in runner["alerts"]:
+        for alert_data in runner[
+            "alerts"
+        ]:
             alert_name = get_alert_display(
-                alert_data["alert_id"]
+                alert_data[
+                    "alert_id"
+                ]
             )
 
             alert_price = alert_data[
@@ -137,6 +197,7 @@ def build_reminder_message(
                     f"Triggered at "
                     f"**${alert_price:.2f}**"
                 )
+
             else:
                 alert_lines.append(
                     f"• {alert_name}"
@@ -186,8 +247,12 @@ def check_race_reminders(
     If a race is two minutes or less from its
     scheduled start and at least one runner has
     previously generated an alert, send one
-    Discord reminder containing all alerted
-    runners.
+    Discord reminder containing all alerted runners.
+
+    The reminder pings:
+        - ALL Alerts
+        - Each specific alert role represented
+          in the race
 
     Only one reminder is sent per race.
     """
@@ -204,7 +269,9 @@ def check_race_reminders(
         for race in races:
             try:
                 race_start = datetime.strptime(
-                    race["race_start"],
+                    race[
+                        "race_start"
+                    ],
                     "%Y-%m-%d %H:%M"
                 )
 
@@ -215,13 +282,9 @@ def check_race_reminders(
                 race_start - now
             ).total_seconds() / 60
 
-            # Race has already reached its
-            # scheduled start.
             if minutes_to_start <= 0:
                 continue
 
-            # Race is not yet inside the
-            # reminder window.
             if (
                 minutes_to_start
                 > REMINDER_WINDOW_MINUTES
@@ -270,13 +333,16 @@ def check_race_reminders(
                 minutes_to_start=minutes_to_start
             )
 
+            role_ids = get_reminder_role_ids(
+                alerted_runners
+            )
+
             try:
                 send_discord_message(
-                    message
+                    message,
+                    role_ids=role_ids
                 )
 
-                # Only mark the reminder as sent
-                # after Discord accepts it.
                 mark_race_reminder_as_sent(
                     database,
                     race_id

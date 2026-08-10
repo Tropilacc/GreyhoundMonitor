@@ -20,8 +20,11 @@ class AlertRule:
         Emoji used in Discord messages.
 
     parameters:
-        Human-readable conditions displayed in the
-        startup Discord notification.
+        Human-readable conditions describing the alert.
+
+    role_env_name:
+        Name of the .env variable containing the
+        Discord role ID for subscribers to this alert.
 
     condition:
         Function that determines whether a runner
@@ -32,6 +35,7 @@ class AlertRule:
     name: str
     emoji: str
     parameters: tuple[str, ...]
+    role_env_name: str
     condition: Callable[[Runner], bool]
 
 
@@ -59,7 +63,6 @@ def price_drift_condition(
     return (
         runner.initial_price
         < PRICE_DRIFT_INITIAL_MAX
-
         and runner.current_price
         > PRICE_DRIFT_CURRENT_MIN
     )
@@ -141,14 +144,8 @@ def heavy_shortening_condition(
 #
 # This is the central list of active alert rules.
 #
-# monitor.py reads this list to determine what alerts
-# should fire.
-#
-# notifications.py reads this same list to build the
-# startup Discord notification.
-#
-# ALERT_HISTORY uses each alert's ID to remember which
-# alerts have already been sent.
+# Each alert also defines the .env variable containing
+# the Discord role ID for subscribers to that alert.
 # ============================================================
 
 ALERTS = (
@@ -165,6 +162,9 @@ ALERTS = (
                 f"Current Price: "
                 f"Above ${PRICE_DRIFT_CURRENT_MIN:.2f}"
             ),
+        ),
+        role_env_name=(
+            "DISCORD_PRICE_DRIFT_ROLE_ID"
         ),
         condition=price_drift_condition,
     ),
@@ -187,6 +187,9 @@ ALERTS = (
                 f"${PRICE_SHORTENING_CURRENT_MAX:.2f} or less"
             ),
         ),
+        role_env_name=(
+            "DISCORD_PRICE_SHORTENING_ROLE_ID"
+        ),
         condition=price_shortening_condition,
     ),
 
@@ -197,16 +200,35 @@ ALERTS = (
         parameters=(
             (
                 f"Initial Price: "
-                f"${HEAVY_SHORTENING_INITIAL_MIN:.2f} or greater"
+                f"${HEAVY_SHORTENING_INITIAL_MIN:.2f} "
+                f"or greater"
             ),
             (
                 f"Current Price: "
-                f"${HEAVY_SHORTENING_CURRENT_MAX:.2f} or less"
+                f"${HEAVY_SHORTENING_CURRENT_MAX:.2f} "
+                f"or less"
             ),
+        ),
+        role_env_name=(
+            "DISCORD_HEAVY_SHORTENING_ROLE_ID"
         ),
         condition=heavy_shortening_condition,
     ),
 )
+
+
+def get_alert_by_id(
+    alert_id: str
+) -> AlertRule | None:
+    """
+    Return the alert rule matching an internal ID.
+    """
+
+    for alert in ALERTS:
+        if alert.id == alert_id:
+            return alert
+
+    return None
 
 
 def get_triggered_alerts(
