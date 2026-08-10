@@ -140,32 +140,27 @@ def heavy_shortening_condition(
 
 
 # ============================================================
-# ALERT 4 — EXTREME PRICE MOVE
+# ALERT 4 — EXTREME PRICE MOVE UP
 #
 # Initial price < $30.00
-# Absolute price movement > $20.00
-#
-# Movement may be either:
-# - Up / drifting
-# - Down / shortening
+# Price increase > $20.00
 # ============================================================
 
 EXTREME_PRICE_MOVE_INITIAL_MAX = 30.00
 EXTREME_PRICE_MOVE_MIN = 20.00
 
 
-def extreme_price_move_condition(
+def extreme_price_move_up_condition(
     runner: Runner
 ) -> bool:
     """
     Trigger when ALL conditions are met:
 
     - Initial price is below $30.00
-    - Price has moved by MORE than $20.00
-    - Movement can be either up or down
+    - Current price has increased by MORE than $20.00
     """
 
-    price_movement = abs(
+    price_increase = (
         runner.current_price
         - runner.initial_price
     )
@@ -174,7 +169,39 @@ def extreme_price_move_condition(
         runner.initial_price
         < EXTREME_PRICE_MOVE_INITIAL_MAX
 
-        and price_movement
+        and price_increase
+        > EXTREME_PRICE_MOVE_MIN
+    )
+
+
+# ============================================================
+# ALERT 5 — EXTREME PRICE MOVE DOWN
+#
+# Initial price < $30.00
+# Price decrease > $20.00
+# ============================================================
+
+
+def extreme_price_move_down_condition(
+    runner: Runner
+) -> bool:
+    """
+    Trigger when ALL conditions are met:
+
+    - Initial price is below $30.00
+    - Current price has decreased by MORE than $20.00
+    """
+
+    price_decrease = (
+        runner.initial_price
+        - runner.current_price
+    )
+
+    return (
+        runner.initial_price
+        < EXTREME_PRICE_MOVE_INITIAL_MAX
+
+        and price_decrease
         > EXTREME_PRICE_MOVE_MIN
     )
 
@@ -184,7 +211,7 @@ def extreme_price_move_condition(
 #
 # This is the central list of active alert rules.
 #
-# Each alert also defines the .env variable containing
+# Each alert defines the .env variable containing
 # the Discord role ID for subscribers to that alert.
 # ============================================================
 
@@ -256,8 +283,8 @@ ALERTS = (
     ),
 
     AlertRule(
-        id="extreme_price_move",
-        name="Extreme Price Move",
+        id="extreme_price_move_up",
+        name="Extreme Price Move Up",
         emoji="💥",
         parameters=(
             (
@@ -265,17 +292,34 @@ ALERTS = (
                 f"Below ${EXTREME_PRICE_MOVE_INITIAL_MAX:.2f}"
             ),
             (
-                f"Price Movement: "
+                f"Price Increase: "
                 f"More than ${EXTREME_PRICE_MOVE_MIN:.2f}"
-            ),
-            (
-                "Direction: Either up or down"
             ),
         ),
         role_env_name=(
-            "DISCORD_EXTREME_PRICE_MOVE_ROLE_ID"
+            "DISCORD_EXTREME_PRICE_MOVE_UP_ROLE_ID"
         ),
-        condition=extreme_price_move_condition,
+        condition=extreme_price_move_up_condition,
+    ),
+
+    AlertRule(
+        id="extreme_price_move_down",
+        name="Extreme Price Move Down",
+        emoji="💥",
+        parameters=(
+            (
+                f"Initial Price: "
+                f"Below ${EXTREME_PRICE_MOVE_INITIAL_MAX:.2f}"
+            ),
+            (
+                f"Price Decrease: "
+                f"More than ${EXTREME_PRICE_MOVE_MIN:.2f}"
+            ),
+        ),
+        role_env_name=(
+            "DISCORD_EXTREME_PRICE_MOVE_DOWN_ROLE_ID"
+        ),
+        condition=extreme_price_move_down_condition,
     ),
 )
 
