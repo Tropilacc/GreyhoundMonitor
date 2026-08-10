@@ -90,7 +90,8 @@ def run_monitor() -> None:
         Begins at +20 minutes for alerted runners.
 
     STATUSCAKE:
-        Heartbeat approximately every 5 minutes.
+        Immediate heartbeat on startup, followed
+        by a heartbeat approximately every 5 minutes.
     """
 
     print()
@@ -99,6 +100,28 @@ def run_monitor() -> None:
     print()
     print("Monitor started.")
     print("Press Ctrl + C to stop.")
+    print()
+
+    # ========================================================
+    # INITIAL STATUSCAKE HEARTBEAT
+    #
+    # Send immediately on startup so StatusCake knows the
+    # tracker is running before race monitoring begins.
+    # ========================================================
+
+    try:
+        send_heartbeat()
+
+        print(
+            "Initial StatusCake heartbeat sent."
+        )
+
+    except Exception as error:
+        print(
+            f"ERROR sending initial StatusCake "
+            f"heartbeat: {error}"
+        )
+
     print()
 
     # ========================================================
@@ -115,9 +138,13 @@ def run_monitor() -> None:
 
     # ========================================================
     # STATUSCAKE TIMER
+    #
+    # Start the normal heartbeat timer from startup.
+    # This prevents another heartbeat being sent immediately
+    # after the first monitoring cycle.
     # ========================================================
 
-    last_heartbeat = 0.0
+    last_heartbeat = time.monotonic()
 
     while True:
         try:

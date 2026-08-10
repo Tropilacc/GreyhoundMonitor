@@ -1,3 +1,5 @@
+from datetime import datetime
+
 from playwright.sync_api import Page
 
 from alerts import ALERTS
@@ -18,6 +20,19 @@ from notifications import (
 from scraper import get_race_prices
 
 
+# ============================================================
+# ALERT TIMING
+#
+# Odds continue to be monitored until +5 minutes after the
+# scheduled race start. That window is controlled by main.py.
+#
+# New alerts are only allowed until +1 minute after the
+# scheduled race start.
+# ============================================================
+
+ALERT_CUTOFF_MINUTES_AFTER_START = 1
+
+
 def build_runner_id(
     meeting_date: str,
     venue_code: str,
@@ -33,6 +48,58 @@ def build_runner_id(
         f"{venue_code}|"
         f"{race_number}|"
         f"{runner_number}"
+    )
+
+
+def are_alerts_allowed(
+    race_start: str
+) -> bool:
+    """
+    Return True while new alerts are still allowed.
+
+    Alerts are allowed:
+        Before scheduled start
+        At scheduled start
+        Up to and including 1 minute after scheduled start
+
+    Alerts are blocked:
+        More than 1 minute after scheduled start
+
+    Price monitoring itself continues through +5 minutes
+    because that is controlled separately by main.py.
+
+    If race_start cannot be parsed, alerts fail closed so
+    an invalid race time cannot cause late alerts.
+    """
+
+    try:
+        scheduled_start = datetime.strptime(
+            race_start,
+            "%Y-%m-%d %H:%M"
+        )
+
+    except ValueError:
+        print(
+            f"WARNING: Could not parse race start "
+            f"'{race_start}'. New alerts blocked "
+            f"for safety."
+        )
+
+        return False
+
+    seconds_after_start = (
+        datetime.now()
+        - scheduled_start
+    ).total_seconds()
+
+    alert_cutoff_seconds = (
+        ALERT_CUTOFF_MINUTES_AFTER_START
+        * 60
+    )
+
+    return (
+        seconds_after_start
+        <= alert_cutoff_seconds
     )
 
 
@@ -58,6 +125,7 @@ def build_alert_message(
             price_change_absolute
             / runner.initial_price
         ) * 100
+
     else:
         price_change_percent = 0
 
@@ -113,7 +181,12 @@ def monitor_race(
     - Updates runner prices.
     - Stores meeting information.
     - Stores the scheduled race start.
-    - Evaluates every active alert rule.
+    - Continues recording prices through +5 minutes,
+      as controlled by main.py.
+    - Allows new alerts only through +1 minute after
+      the scheduled race start.
+    - Evaluates every active alert rule while alerts
+      are permitted.
     - Sends qualifying Discord alerts.
     - Pings ALL Alerts subscribers.
     - Pings the role subscribed to the specific alert.
@@ -129,7 +202,29 @@ def monitor_race(
         print(
             "No runner prices found."
         )
+
         return
+
+    # ========================================================
+    # DETERMINE WHETHER NEW ALERTS ARE STILL ALLOWED
+    #
+    # This is calculated after the scrape so that the actual
+    # time at which prices are being processed is used.
+    #
+    # Even when False, runner prices are still saved below.
+    # ========================================================
+
+    alerts_allowed = are_alerts_allowed(
+        race_start
+    )
+
+    if not alerts_allowed:
+        print(
+            f"Alert cutoff passed for "
+            f"{meeting_name} R{race_number}. "
+            f"Prices will still be updated, "
+            f"but no new alerts will trigger."
+        )
 
     database = connect_database()
 
@@ -172,6 +267,13 @@ def monitor_race(
                 current_price=current_price
             )
 
+            # =================================================
+            # ALWAYS SAVE THE LATEST PRICE
+            #
+            # This continues even after the alert cutoff.
+            # INITIALPRICE remains preserved by save_runner().
+            # =================================================
+
             save_runner(
                 database,
                 runner
@@ -196,7 +298,22 @@ def monitor_race(
                 f"${stored_runner.current_price:.2f}"
             )
 
-            # ==================================================
+            # =================================================
+            # ALERT CUTOFF
+            #
+            # After scheduled start +1 minute:
+            #
+            # - Price is still saved.
+            # - CURRENTPRICE is still updated.
+            # - No alert rules are evaluated.
+            # - No Discord alerts are sent.
+            # - No ALERT_HISTORY rows are created.
+            # =================================================
+
+            if not alerts_allowed:
+                continue
+
+            # =================================================
             # GENERIC ALERT ENGINE
             #
             # Every active rule in alerts.py is evaluated.
@@ -205,7 +322,7 @@ def monitor_race(
             #
             # 1. ALL Alerts role
             # 2. The role assigned to this specific alert
-            # ==================================================
+            # =================================================
 
             for alert in ALERTS:
                 if not alert.condition(
