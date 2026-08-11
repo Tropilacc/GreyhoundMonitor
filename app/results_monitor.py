@@ -6,7 +6,6 @@ from database import (
     connect_database,
     create_tables,
     get_unchecked_alert_runners,
-    mark_result_checked,
     save_finish_position,
 )
 from result_scraper import get_race_results
@@ -22,7 +21,7 @@ def build_race_url(
     race_number: int
 ) -> str:
     """
-    Build the TAB URL for a greyhound race.
+    Build the normal TAB URL for a greyhound race.
 
     Example:
 
@@ -41,6 +40,9 @@ def build_race_url(
     Result:
         https://www.tab.com.au/racing/
         2026-08-10/SHEPPARTON/SHE/G/6
+
+    result_scraper.py is responsible for attempting
+    the TAB Form fallback when required.
     """
 
     meeting_slug = (
@@ -67,10 +69,6 @@ def parse_runner_race_start(
     unchecked alerted runner.
 
     Returns None if race_start is unavailable.
-
-    This function is included so result checking can
-    enforce the 20-minute delay once race_start is
-    supplied by the database query.
     """
 
     race_start = runner.get(
@@ -140,8 +138,13 @@ def process_race_results(
 
     IMPORTANT:
 
-    If no result is found, nothing is marked as
-    checked. This allows the tracker to retry later.
+    A runner is only considered processed when an
+    actual finishing position has been found.
+
+    If an official race result exists but a particular
+    alerted runner is missing from the parsed finishing
+    positions, that runner remains unchecked so the
+    tracker can retry it later.
     """
 
     browser_session = BrowserSession()
@@ -225,7 +228,10 @@ def process_race_results(
             )
 
             # =================================================
-            # PLACED RUNNER
+            # FINISHING POSITION FOUND
+            #
+            # save_finish_position() stores the position and
+            # marks RESULTCHECKED = 1.
             # =================================================
 
             if finish_position is not None:
@@ -255,32 +261,28 @@ def process_race_results(
                 )
 
             # =================================================
-            # NON-PLACED RUNNER
+            # RUNNER NOT FOUND IN PARSED RESULTS
             #
-            # TAB's result block may only contain the first
-            # four finishers.
+            # DO NOT mark RESULTCHECKED.
             #
-            # If an official result exists but our alerted
-            # runner isn't in that result block, we know the
-            # runner did not finish in one of those positions.
+            # We know that some form of official result was
+            # returned, but we do not know this runner's actual
+            # finishing position.
             #
-            # For the immediate Power BI requirement —
-            # "did the alerted dog win?" — this is sufficient.
+            # Leaving RESULTCHECKED = 0 ensures that
+            # get_unchecked_alert_runners() returns this runner
+            # again and the tracker can retry later.
             # =================================================
 
             else:
-                mark_result_checked(
-                    database,
-                    runner_id
-                )
-
                 print(
-                    f"Result saved: "
+                    f"Result incomplete: "
                     f"{alerted_runner['venue_code']} "
                     f"R{alerted_runner['race_number']} "
                     f"#{runner_number} "
                     f"{runner_name} — "
-                    f"not a winner"
+                    f"finishing position not found; "
+                    f"leaving result unchecked."
                 )
 
     finally:
@@ -303,9 +305,9 @@ def check_unprocessed_results() -> None:
 
     has been reached.
 
-    Once an official result is stored, that runner
-    will no longer be returned by
-    get_unchecked_alert_runners().
+    A runner will stop being returned by
+    get_unchecked_alert_runners() only after an actual
+    finishing position has been stored.
     """
 
     database = connect_database()
@@ -361,9 +363,9 @@ def check_unprocessed_results() -> None:
         race_number
     ), alerted_runners in races.items():
 
-        # --------------------------------------------
+        # ----------------------------------------------------
         # WAIT UNTIL +20 MINUTES
-        # --------------------------------------------
+        # ----------------------------------------------------
 
         if not race_is_ready_for_result_check(
             alerted_runners,
@@ -379,6 +381,7 @@ def check_unprocessed_results() -> None:
         )
 
         print()
+
         print(
             f"Checking result: "
             f"{meeting_name} "
