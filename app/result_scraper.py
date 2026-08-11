@@ -3,6 +3,10 @@ from urllib.parse import urlparse
 
 from playwright.sync_api import Page
 
+from dev_notifications import (
+    send_missing_form_venue_alert,
+)
+
 
 # ============================================================
 # TAB FORM VENUE CODES
@@ -104,6 +108,9 @@ def build_form_url(
 
     Returns None when no Form venue code has been
     configured for the meeting.
+
+    When a code is missing, a private Discord development
+    warning is sent once per tracker session.
     """
 
     parsed_url = urlparse(
@@ -135,10 +142,19 @@ def build_form_url(
 
         return None
 
-    meeting_date = path_parts[1]
+    meeting_date = (
+        path_parts[1]
+        .strip()
+    )
 
     meeting_slug = (
         path_parts[2]
+        .strip()
+        .upper()
+    )
+
+    normal_venue_code = (
+        path_parts[3]
         .strip()
         .upper()
     )
@@ -149,7 +165,10 @@ def build_form_url(
         .upper()
     )
 
-    race_number = path_parts[5]
+    race_number = (
+        path_parts[5]
+        .strip()
+    )
 
     form_venue_code = (
         TAB_FORM_VENUE_CODES.get(
@@ -160,8 +179,29 @@ def build_form_url(
     if form_venue_code is None:
         print(
             f"WARNING: No TAB Form venue code "
-            f"configured for {meeting_slug}."
+            f"configured for {meeting_slug} "
+            f"({normal_venue_code})."
         )
+
+        # ====================================================
+        # PRIVATE DEVELOPMENT WARNING
+        #
+        # Failure to send the Discord warning must NEVER
+        # stop Greyhound Tracker from continuing.
+        # ====================================================
+
+        try:
+            send_missing_form_venue_alert(
+                meeting_name=meeting_slug,
+                normal_venue_code=normal_venue_code,
+                meeting_date=meeting_date
+            )
+
+        except Exception as error:
+            print(
+                f"ERROR while attempting missing venue "
+                f"notification: {error}"
+            )
 
         return None
 
@@ -217,13 +257,6 @@ def parse_results(
 
     # ========================================================
     # STOP BEFORE EXOTIC RESULTS
-    #
-    # Prevent combinations such as:
-    #
-    #     Quinella
-    #     3-4
-    #
-    # from ever being interpreted as finishing positions.
     # ========================================================
 
     exotic_match = re.search(
@@ -245,9 +278,6 @@ def parse_results(
     #     2nd             4. WHERE'S THE BOSS
     #     3rd             2. SPLENDACIOUS
     #     4th             1. CHAD'S A STAR
-    #
-    # The runner name ends at the newline, so trainer and
-    # dividend information on later lines is ignored.
     # ========================================================
 
     result_pattern = re.compile(
