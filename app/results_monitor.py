@@ -8,10 +8,60 @@ from database import (
     get_unchecked_alert_runners,
     save_finish_position,
 )
-from result_scraper import get_race_results
+from result_scraper import (
+    build_form_url,
+    scrape_results_from_url,
+)
 
 
 RESULT_CHECK_DELAY_MINUTES = 20
+
+# ============================================================
+# RESULT POSITION RULES
+#
+# FINISHPOSITION meanings:
+#
+#     NULL
+#         Result has not yet been established.
+#         RESULTCHECKED remains 0.
+#
+#     1
+#         Runner finished 1st AND TAB paid a
+#         Fixed Odds dividend.
+#
+#         Power BI:
+#             Win
+#
+#     2-10
+#         Runner was explicitly listed in that finishing
+#         position AND TAB paid a Fixed Odds dividend.
+#
+#         Power BI:
+#             Place
+#
+#     99
+#         Did not place for Fixed Odds purposes.
+#
+#         This includes:
+#
+#             - runner explicitly listed in the result,
+#               but NO Fixed Odds dividend was paid
+#
+#             - runner not listed in the published
+#               TAB/Form result rows
+#
+#         Tote is ignored completely.
+#
+# IMPORTANT:
+#
+# A finishing position by itself does NOT mean the runner
+# placed.
+#
+# The Fixed Odds settlement dividend determines whether
+# the runner is treated as Win / Place / Did not Place.
+# ============================================================
+
+DID_NOT_PLACE_POSITION = 99
 
 
 def build_race_url(
@@ -21,28 +71,12 @@ def build_race_url(
     race_number: int
 ) -> str:
     """
-    Build the normal TAB URL for a greyhound race.
+    Build the normal TAB URL for a race.
 
     Example:
 
-    meeting_date:
-        2026-08-10
-
-    meeting_name:
-        SHEPPARTON
-
-    venue_code:
-        SHE
-
-    race_number:
-        6
-
-    Result:
         https://www.tab.com.au/racing/
-        2026-08-10/SHEPPARTON/SHE/G/6
-
-    result_scraper.py is responsible for attempting
-    the TAB Form fallback when required.
+        2026-08-11/BULLI/BUL/G/2
     """
 
     meeting_slug = (
@@ -68,7 +102,8 @@ def parse_runner_race_start(
     Read the race start time stored against an
     unchecked alerted runner.
 
-    Returns None if race_start is unavailable.
+    Returns None if race_start is unavailable
+    or malformed.
     """
 
     race_start = runner.get(
@@ -88,115 +123,477 @@ def parse_runner_race_start(
         return None
 
 
+def parse_runner_meeting_date(
+    runner: dict
+) -> datetime | None:
+    """
+    Read MEETINGDATE for an alerted runner.
+
+    Expected format:
+
+        YYYY-MM-DD
+
+    Returns None if unavailable or malformed.
+    """
+
+    meeting_date = runner.get(
+        "meeting_date"
+    )
+
+    if not meeting_date:
+        return None
+
+    try:
+        return datetime.strptime(
+            meeting_date,
+            "%Y-%m-%d"
+        )
+
+    except ValueError:
+        return None
+
+
 def race_is_ready_for_result_check(
     alerted_runners: list[dict],
     now: datetime
 ) -> bool:
     """
-    Return True only when at least 20 minutes have
-    passed since the scheduled race start.
+    Determine whether a race can be checked for results.
 
-    All runners in this list belong to the same race,
-    so only the first runner needs to be inspected.
+    Normal behaviour:
+
+        RACESTART exists
+            -> wait until RACESTART + 20 minutes
+
+    Historical fallback:
+
+        RACESTART is missing
+        AND MEETINGDATE is before today
+            -> allow result check
+
+    Safety behaviour:
+
+        RACESTART is missing
+        AND MEETINGDATE is today or in the future
+            -> do not check
+
+        RACESTART and MEETINGDATE are both unusable
+            -> do not check
     """
 
     if not alerted_runners:
         return False
 
+    runner = alerted_runners[0]
+
+    # ========================================================
+    # PRIMARY RULE — USE RACESTART WHEN AVAILABLE
+    # ========================================================
+
     race_start = parse_runner_race_start(
-        alerted_runners[0]
+        runner
     )
 
-    if race_start is None:
+    if race_start is not None:
+
+        result_check_time = (
+            race_start
+            + timedelta(
+                minutes=RESULT_CHECK_DELAY_MINUTES
+            )
+        )
+
+        return now >= result_check_time
+
+    # ========================================================
+    # HISTORICAL FALLBACK
+    # ========================================================
+
+    meeting_date = parse_runner_meeting_date(
+        runner
+    )
+
+    if meeting_date is None:
         return False
 
-    result_check_time = (
-        race_start
-        + timedelta(
-            minutes=RESULT_CHECK_DELAY_MINUTES
+    today = now.date()
+
+    if meeting_date.date() < today:
+        print(
+            f"Historical result fallback: "
+            f"RACESTART missing for "
+            f"{runner['venue_code']} "
+            f"R{runner['race_number']}; "
+            f"MEETINGDATE "
+            f"{runner['meeting_date']} "
+            f"is in the past."
         )
+
+        return True
+
+    return False
+
+
+def results_have_fixed_odds_status(
+    results: list[dict]
+) -> bool:
+    """
+    Return True only when every parsed result has a known
+    Fixed Odds settlement status.
+
+    Structured DOM results contain:
+
+        fixed_odds_paid = True / False
+
+    The legacy flattened-text fallback contains:
+
+        fixed_odds_paid = None
+
+    Because Tote must be ignored completely, results with
+    an unknown Fixed Odds status are not sufficient for
+    final classification.
+    """
+
+    if not results:
+        return False
+
+    for result in results:
+
+        fixed_odds_paid = (
+            result.get(
+                "fixed_odds_paid"
+            )
+        )
+
+        if fixed_odds_paid is None:
+            return False
+
+    return True
+
+
+def get_results_with_isolated_sessions(
+    race_url: str
+) -> list[dict]:
+    """
+    Retrieve official race results using completely
+    separate browser sessions for normal TAB and TAB Form.
+
+    Fixed Odds settlement information is mandatory.
+
+    If the normal TAB page returns finishing positions but
+    Fixed Odds settlement status is unknown, that result is
+    NOT accepted.
+
+    TAB Form is then attempted in a fresh BrowserSession.
+
+    This preserves the browser-isolation behaviour proven
+    necessary for TAB Form historical pages.
+    """
+
+    # ========================================================
+    # ATTEMPT 1 — NORMAL TAB
+    # ========================================================
+
+    normal_session = BrowserSession()
+
+    try:
+        normal_session.start()
+
+        normal_page = (
+            normal_session.get_page()
+        )
+
+        results = scrape_results_from_url(
+            page=normal_page,
+            race_url=race_url
+        )
+
+        if results:
+
+            if results_have_fixed_odds_status(
+                results
+            ):
+                print(
+                    "Official result with Fixed Odds "
+                    "settlement found on normal TAB page."
+                )
+
+                return results
+
+            print(
+                "Normal TAB result found, but "
+                "Fixed Odds settlement status "
+                "could not be determined."
+            )
+
+            print(
+                "Trying TAB Form in a fresh "
+                "browser session."
+            )
+
+        else:
+            print(
+                "No result found on normal TAB page."
+            )
+
+    except Exception as error:
+        print(
+            f"Normal TAB result page failed: "
+            f"{error}"
+        )
+
+    finally:
+        normal_session.close()
+
+    # ========================================================
+    # BUILD TAB FORM URL
+    # ========================================================
+
+    form_url = build_form_url(
+        race_url
     )
 
-    return now >= result_check_time
+    if form_url is None:
+        return []
+
+    # ========================================================
+    # ATTEMPT 2 — TAB FORM
+    #
+    # Completely separate BrowserSession.
+    # ========================================================
+
+    form_session = BrowserSession()
+
+    try:
+        form_session.start()
+
+        form_page = (
+            form_session.get_page()
+        )
+
+        results = scrape_results_from_url(
+            page=form_page,
+            race_url=form_url
+        )
+
+        if results:
+
+            if results_have_fixed_odds_status(
+                results
+            ):
+                print(
+                    "Official result with Fixed Odds "
+                    "settlement found on TAB Form page."
+                )
+
+                return results
+
+            print(
+                "TAB Form result found, but "
+                "Fixed Odds settlement status "
+                "could not be determined."
+            )
+
+            print(
+                "Leaving result unresolved rather than "
+                "using Tote or guessing payout status."
+            )
+
+        else:
+            print(
+                "No result found on TAB Form page."
+            )
+
+    except Exception as error:
+        print(
+            f"TAB Form result page failed: "
+            f"{error}"
+        )
+
+    finally:
+        form_session.close()
+
+    return []
 
 
 def process_race_results(
     race_url: str,
     alerted_runners: list[dict]
-) -> bool:
+) -> tuple[bool, int]:
     """
-    Visit one completed TAB race and process the
-    official finishing positions for alerted runners.
+    Process the official Fixed Odds result for one race.
 
     Returns:
 
-        True
-            TAB published an official result.
+        (True, resolved_runner_count)
 
-        False
-            No official result was available yet.
+            At least one usable official result was
+            published with known Fixed Odds settlement
+            status and alerted runners were processed.
 
-    IMPORTANT:
+        (False, 0)
 
-    A runner is only considered processed when an
-    actual finishing position has been found.
+            No usable Fixed Odds result was available.
 
-    If an official race result exists but a particular
-    alerted runner is missing from the parsed finishing
-    positions, that runner remains unchecked so the
-    tracker can retry it later.
+    FINAL CLASSIFICATION:
+
+        Runner listed 1st
+        AND Fixed Odds dividend paid:
+            FINISHPOSITION = 1
+            -> Win
+
+        Runner listed 2nd or lower
+        AND Fixed Odds dividend paid:
+            FINISHPOSITION = exact position
+            -> Place
+
+        Runner explicitly listed
+        BUT no Fixed Odds dividend paid:
+            FINISHPOSITION = 99
+            -> Did not Place
+
+        Runner absent from published result rows:
+            FINISHPOSITION = 99
+            -> Did not Place
+
+        Tote is ignored completely.
     """
 
-    browser_session = BrowserSession()
+    results = get_results_with_isolated_sessions(
+        race_url
+    )
 
-    try:
-        browser_session.start()
-
-        page = browser_session.get_page()
-
-        results = get_race_results(
-            page=page,
-            race_url=race_url
-        )
-
-    except Exception as error:
-        print(
-            f"ERROR scraping race result: "
-            f"{error}"
-        )
-
-        return False
-
-    finally:
-        browser_session.close()
+    # ========================================================
+    # NO USABLE FIXED ODDS RESULT YET
+    # ========================================================
 
     if not results:
         print(
-            "Official result not available yet."
+            "Official Fixed Odds result "
+            "not available yet."
         )
 
-        return False
+        return False, 0
 
     # ========================================================
-    # BUILD FINISHING POSITION LOOKUP
+    # BUILD PUBLISHED RESULT LOOKUP
     #
     # Example:
     #
     # {
-    #     4: 1,
-    #     8: 2,
-    #     3: 3,
-    #     7: 4
+    #     5: {
+    #         "finish_position": 1,
+    #         "fixed_odds_paid": True,
+    #         "fixed_odds_values": [8.00, 2.20]
+    #     },
+    #     8: {
+    #         "finish_position": 2,
+    #         "fixed_odds_paid": True,
+    #         "fixed_odds_values": [1.80]
+    #     },
+    #     4: {
+    #         "finish_position": 4,
+    #         "fixed_odds_paid": False,
+    #         "fixed_odds_values": []
+    #     }
     # }
     # ========================================================
 
-    finish_positions = {
-        result["runner_number"]:
-        result["finish_position"]
-        for result in results
-    }
+    published_results = {}
+
+    for result in results:
+
+        runner_number = (
+            result.get(
+                "runner_number"
+            )
+        )
+
+        finish_position = (
+            result.get(
+                "finish_position"
+            )
+        )
+
+        fixed_odds_paid = (
+            result.get(
+                "fixed_odds_paid"
+            )
+        )
+
+        fixed_odds_values = (
+            result.get(
+                "fixed_odds_values",
+                []
+            )
+        )
+
+        if runner_number is None:
+            continue
+
+        if finish_position is None:
+            continue
+
+        if fixed_odds_paid is None:
+            continue
+
+        try:
+            runner_number = int(
+                runner_number
+            )
+
+            finish_position = int(
+                finish_position
+            )
+
+        except (
+            TypeError,
+            ValueError
+        ):
+            continue
+
+        published_results[
+            runner_number
+        ] = {
+            "finish_position":
+                finish_position,
+            "fixed_odds_paid":
+                bool(fixed_odds_paid),
+            "fixed_odds_values":
+                fixed_odds_values,
+        }
+
+    # ========================================================
+    # SAFETY CHECK
+    # ========================================================
+
+    if not published_results:
+        print(
+            "Official result data was returned, "
+            "but no usable Fixed Odds settlement "
+            "records could be parsed."
+        )
+
+        print(
+            "Leaving alerted runners unchecked."
+        )
+
+        return False, 0
+
+    print(
+        f"Official published result contains "
+        f"{len(published_results)} "
+        f"runner(s) with known Fixed Odds "
+        f"settlement status."
+    )
+
+    # ========================================================
+    # SAVE RESULTS
+    # ========================================================
 
     database = connect_database()
+
+    resolved_runner_count = 0
 
     try:
         create_tables(database)
@@ -221,74 +618,206 @@ def process_race_results(
                 ]
             )
 
-            finish_position = (
-                finish_positions.get(
+            published_result = (
+                published_results.get(
                     runner_number
                 )
             )
 
             # =================================================
-            # FINISHING POSITION FOUND
+            # RUNNER NOT LISTED IN OFFICIAL RESULT ROWS
             #
-            # save_finish_position() stores the position and
-            # marks RESULTCHECKED = 1.
+            # Did not Place.
             # =================================================
 
-            if finish_position is not None:
+            if published_result is None:
 
                 save_finish_position(
                     database,
                     runner_id,
-                    finish_position
+                    DID_NOT_PLACE_POSITION
                 )
 
-                if finish_position == 1:
-                    result_text = "WINNER"
-
-                else:
-                    result_text = (
-                        f"finished "
-                        f"{finish_position}"
-                    )
+                resolved_runner_count += 1
 
                 print(
                     f"Result saved: "
                     f"{alerted_runner['venue_code']} "
                     f"R{alerted_runner['race_number']} "
                     f"#{runner_number} "
-                    f"{runner_name} — "
-                    f"{result_text}"
+                    f"{runner_name} - "
+                    f"DID NOT PLACE "
+                    f"(not listed in TAB/Form "
+                    f"result rows)"
                 )
 
+                continue
+
+            finish_position = (
+                published_result[
+                    "finish_position"
+                ]
+            )
+
+            fixed_odds_paid = (
+                published_result[
+                    "fixed_odds_paid"
+                ]
+            )
+
+            fixed_odds_values = (
+                published_result[
+                    "fixed_odds_values"
+                ]
+            )
+
             # =================================================
-            # RUNNER NOT FOUND IN PARSED RESULTS
+            # LISTED BUT NO FIXED ODDS DIVIDEND
             #
-            # DO NOT mark RESULTCHECKED.
+            # Example:
             #
-            # We know that some form of official result was
-            # returned, but we do not know this runner's actual
-            # finishing position.
+            #     4th GOLD CARD
             #
-            # Leaving RESULTCHECKED = 0 ensures that
-            # get_unchecked_alert_runners() returns this runner
-            # again and the tracker can retry later.
+            #     Tote may show a dividend elsewhere,
+            #     but Fixed Odds result cell is blank.
+            #
+            #     -> DID NOT PLACE
             # =================================================
 
-            else:
+            if not fixed_odds_paid:
+
+                save_finish_position(
+                    database,
+                    runner_id,
+                    DID_NOT_PLACE_POSITION
+                )
+
+                resolved_runner_count += 1
+
                 print(
-                    f"Result incomplete: "
+                    f"Result saved: "
                     f"{alerted_runner['venue_code']} "
                     f"R{alerted_runner['race_number']} "
                     f"#{runner_number} "
-                    f"{runner_name} — "
-                    f"finishing position not found; "
-                    f"leaving result unchecked."
+                    f"{runner_name} - "
+                    f"DID NOT PLACE "
+                    f"(finished {finish_position}, "
+                    f"no Fixed Odds dividend)"
                 )
+
+                continue
+
+            # =================================================
+            # FIXED ODDS DIVIDEND PAID
+            #
+            # 1st:
+            #     WIN
+            #
+            # 2nd+:
+            #     PLACE
+            # =================================================
+
+            save_finish_position(
+                database,
+                runner_id,
+                finish_position
+            )
+
+            resolved_runner_count += 1
+
+            fixed_text = (
+                ", ".join(
+                    f"${value:.2f}"
+                    for value
+                    in fixed_odds_values
+                )
+            )
+
+            if finish_position == 1:
+
+                result_text = (
+                    f"1st - WIN"
+                )
+
+            else:
+
+                result_text = (
+                    f"{finish_position} - PLACE"
+                )
+
+            if fixed_text:
+                result_text += (
+                    f" "
+                    f"(Fixed: {fixed_text})"
+                )
+
+            print(
+                f"Result saved: "
+                f"{alerted_runner['venue_code']} "
+                f"R{alerted_runner['race_number']} "
+                f"#{runner_number} "
+                f"{runner_name} - "
+                f"{result_text}"
+            )
 
     finally:
         database.close()
 
-    return True
+    return True, resolved_runner_count
+
+
+def get_unresolved_summary() -> tuple[int, int]:
+    """
+    Return:
+
+        unresolved_race_count,
+        unresolved_runner_count
+
+    based on ALERT_HISTORY records where
+    RESULTCHECKED = 0.
+    """
+
+    database = connect_database()
+
+    try:
+        create_tables(database)
+
+        unresolved_runners = (
+            get_unchecked_alert_runners(
+                database
+            )
+        )
+
+    finally:
+        database.close()
+
+    unresolved_runner_count = len(
+        unresolved_runners
+    )
+
+    unresolved_races = set()
+
+    for runner in unresolved_runners:
+
+        race_key = (
+            runner["meeting_date"],
+            runner["meeting_name"],
+            runner["venue_code"],
+            runner["race_number"]
+        )
+
+        unresolved_races.add(
+            race_key
+        )
+
+    unresolved_race_count = len(
+        unresolved_races
+    )
+
+    return (
+        unresolved_race_count,
+        unresolved_runner_count
+    )
 
 
 def check_unprocessed_results() -> None:
@@ -299,15 +828,12 @@ def check_unprocessed_results() -> None:
     Runners are grouped by race so TAB is only visited
     once for each race.
 
-    Result checks occur only when:
+    Prints a summary showing:
 
-        scheduled race start + 20 minutes
-
-    has been reached.
-
-    A runner will stop being returned by
-    get_unchecked_alert_runners() only after an actual
-    finishing position has been stored.
+        races processed this run
+        runners resolved this run
+        unresolved races remaining
+        unresolved runners remaining
     """
 
     database = connect_database()
@@ -325,6 +851,17 @@ def check_unprocessed_results() -> None:
         database.close()
 
     if not unchecked_runners:
+        print()
+        print("No unresolved alerted results.")
+
+        print()
+        print("RESULT MONITOR SUMMARY")
+        print("----------------------")
+        print("Processed races: 0")
+        print("Resolved runners: 0")
+        print("Unresolved races: 0")
+        print("Unresolved runners: 0")
+
         return
 
     # ========================================================
@@ -348,9 +885,34 @@ def check_unprocessed_results() -> None:
             runner
         )
 
+    initial_unresolved_races = len(
+        races
+    )
+
+    initial_unresolved_runners = len(
+        unchecked_runners
+    )
+
+    print()
+    print("RESULT MONITOR START")
+    print("--------------------")
+
+    print(
+        f"Unresolved races: "
+        f"{initial_unresolved_races}"
+    )
+
+    print(
+        f"Unresolved runners: "
+        f"{initial_unresolved_runners}"
+    )
+
     now = datetime.now()
 
     races_checked = 0
+    runners_resolved = 0
+    races_skipped_missing_meeting = 0
+    races_not_ready = 0
 
     # ========================================================
     # PROCESS ELIGIBLE RACES
@@ -364,13 +926,58 @@ def check_unprocessed_results() -> None:
     ), alerted_runners in races.items():
 
         # ----------------------------------------------------
-        # WAIT UNTIL +20 MINUTES
+        # MISSING MEETING NAME
+        # ----------------------------------------------------
+
+        if not meeting_name:
+
+            races_skipped_missing_meeting += 1
+
+            print()
+
+            print(
+                f"Skipping result: "
+                f"{venue_code} "
+                f"R{race_number}"
+            )
+
+            print(
+                "Reason: MEETINGNAME is missing "
+                "from RUNNERS."
+            )
+
+            for runner in alerted_runners:
+                print(
+                    f"  Unresolved runner: "
+                    f"#{runner['runner_number']} "
+                    f"{runner['runner_name']}"
+                )
+
+            continue
+
+        # ----------------------------------------------------
+        # RESULT-CHECK TIMING
         # ----------------------------------------------------
 
         if not race_is_ready_for_result_check(
             alerted_runners,
             now
         ):
+            races_not_ready += 1
+
+            print()
+
+            print(
+                f"Skipping result: "
+                f"{meeting_name} "
+                f"R{race_number}"
+            )
+
+            print(
+                "Reason: race is not yet eligible "
+                "for a result check."
+            )
+
             continue
 
         race_url = build_race_url(
@@ -388,19 +995,70 @@ def check_unprocessed_results() -> None:
             f"R{race_number}"
         )
 
-        result_found = (
-            process_race_results(
-                race_url=race_url,
-                alerted_runners=alerted_runners
-            )
+        (
+            result_found,
+            resolved_runner_count
+        ) = process_race_results(
+            race_url=race_url,
+            alerted_runners=alerted_runners
         )
 
         if result_found:
             races_checked += 1
 
-    if races_checked > 0:
+            runners_resolved += (
+                resolved_runner_count
+            )
+
+    # ========================================================
+    # FINAL UNRESOLVED STATE
+    # ========================================================
+
+    (
+        unresolved_race_count,
+        unresolved_runner_count
+    ) = get_unresolved_summary()
+
+    # ========================================================
+    # SUMMARY
+    # ========================================================
+
+    print()
+    print("RESULT MONITOR SUMMARY")
+    print("----------------------")
+
+    print(
+        f"Processed races: "
+        f"{races_checked}"
+    )
+
+    print(
+        f"Resolved runners: "
+        f"{runners_resolved}"
+    )
+
+    print(
+        f"Unresolved races: "
+        f"{unresolved_race_count}"
+    )
+
+    print(
+        f"Unresolved runners: "
+        f"{unresolved_runner_count}"
+    )
+
+    if races_skipped_missing_meeting > 0:
         print(
-            f"Result check complete. "
-            f"Processed "
-            f"{races_checked} race(s)."
+            f"Missing meeting-name races: "
+            f"{races_skipped_missing_meeting}"
         )
+
+    if races_not_ready > 0:
+        print(
+            f"Not-yet-eligible races: "
+            f"{races_not_ready}"
+        )
+
+
+if __name__ == "__main__":
+    check_unprocessed_results()
