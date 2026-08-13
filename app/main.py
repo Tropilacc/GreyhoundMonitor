@@ -2,12 +2,17 @@ import time
 from datetime import datetime
 
 from browser_session import BrowserSession
+from dev_alerts import send_dev_alert
 from heartbeat import send_heartbeat
 from monitor import monitor_race
 from race_finder import get_todays_greyhound_races
 from reminders import check_race_reminders
 from results_monitor import check_unprocessed_results
-from stats_report import get_stats, send_to_discord, create_chart
+from stats_report import (
+    create_chart,
+    get_stats,
+    send_to_discord,
+)
 
 
 # ============================================================
@@ -49,6 +54,7 @@ def run_stats_report() -> None:
             "No resolved alerted runners found "
             "for statistics report."
         )
+
         return
 
     chart_created = create_chart(
@@ -59,6 +65,16 @@ def run_stats_report() -> None:
         print(
             "Statistics chart could not be created."
         )
+
+        send_dev_alert(
+            source="STATS REPORT",
+            message=(
+                "Statistics data was available, "
+                "but the chart could not be created."
+            ),
+            severity="WARNING",
+        )
+
         return
 
     send_to_discord(
@@ -168,6 +184,13 @@ def run_monitor() -> None:
         Immediate 7-day statistics report on startup,
         followed by another report approximately
         every 6 hours while the monitor is running.
+
+    DEV ALERTS:
+        Operational errors and meaningful faults are
+        sent to DISCORD_DEV_WEBHOOK_URL.
+
+        Expected operating conditions are NOT sent
+        to the DEV channel.
     """
 
     print()
@@ -180,9 +203,6 @@ def run_monitor() -> None:
 
     # ========================================================
     # INITIAL STATUSCAKE HEARTBEAT
-    #
-    # Send immediately on startup so StatusCake knows the
-    # tracker is running before race monitoring begins.
     # ========================================================
 
     try:
@@ -196,6 +216,15 @@ def run_monitor() -> None:
         print(
             f"ERROR sending initial StatusCake "
             f"heartbeat: {error}"
+        )
+
+        send_dev_alert(
+            source="MAIN / STATUSCAKE",
+            message=(
+                "Initial StatusCake heartbeat failed."
+            ),
+            error=error,
+            severity="WARNING",
         )
 
     # ========================================================
@@ -215,6 +244,15 @@ def run_monitor() -> None:
             f"report: {error}"
         )
 
+        send_dev_alert(
+            source="MAIN / STATS REPORT",
+            message=(
+                "Initial 7-day statistics report failed."
+            ),
+            error=error,
+            severity="ERROR",
+        )
+
     print()
 
     # ========================================================
@@ -231,10 +269,6 @@ def run_monitor() -> None:
 
     # ========================================================
     # STATUSCAKE TIMER
-    #
-    # Start the normal heartbeat timer from startup.
-    # This prevents another heartbeat being sent immediately
-    # after the first monitoring cycle.
     # ========================================================
 
     last_heartbeat = time.monotonic()
@@ -242,10 +276,10 @@ def run_monitor() -> None:
     # ========================================================
     # STATISTICS TIMER
     #
-    # The initial report has already been sent above.
+    # The initial report has already been attempted above.
     #
-    # Start the 6-hour timer now so the next report occurs
-    # approximately 6 hours after startup/restart.
+    # Next report:
+    #     approximately 6 hours after startup
     # ========================================================
 
     last_stats_report = time.monotonic()
@@ -258,9 +292,38 @@ def run_monitor() -> None:
             # DISCOVER RACES
             # =================================================
 
-            races = (
-                get_todays_greyhound_races()
-            )
+            try:
+                races = (
+                    get_todays_greyhound_races()
+                )
+
+            except Exception as error:
+                print()
+                print(
+                    f"ERROR discovering today's "
+                    f"greyhound races: {error}"
+                )
+
+                send_dev_alert(
+                    source="MAIN / RACE FINDER",
+                    message=(
+                        "Failed to discover today's "
+                        "greyhound races."
+                    ),
+                    error=error,
+                    severity="ERROR",
+                )
+
+                print(
+                    f"Retrying in "
+                    f"{MAIN_LOOP_SECONDS} seconds..."
+                )
+
+                time.sleep(
+                    MAIN_LOOP_SECONDS
+                )
+
+                continue
 
             print(
                 f"Eligible races: {len(races)}"
@@ -283,16 +346,74 @@ def run_monitor() -> None:
                     f"{error}"
                 )
 
+                send_dev_alert(
+                    source="MAIN / REMINDERS",
+                    message=(
+                        "Pre-race reminder check failed."
+                    ),
+                    error=error,
+                    severity="ERROR",
+                )
+
             # =================================================
             # PRICE MONITORING
             # =================================================
 
             for race in races:
-                race_start = (
-                    parse_race_start(
-                        race
+
+                # -------------------------------------------------
+                # PARSE RACE START
+                # -------------------------------------------------
+
+                try:
+                    race_start = (
+                        parse_race_start(
+                            race
+                        )
                     )
-                )
+
+                except Exception as error:
+                    print()
+                    print(
+                        f"ERROR parsing race start for "
+                        f"{race.get('meeting_name')} "
+                        f"R{race.get('race_number')}: "
+                        f"{error}"
+                    )
+
+                    send_dev_alert(
+                        source="MAIN / RACE DATA",
+                        message=(
+                            "Race start time could not "
+                            "be parsed."
+                        ),
+                        error=error,
+                        severity="ERROR",
+                        details={
+                            "Meeting":
+                                race.get(
+                                    "meeting_name"
+                                ),
+                            "Venue code":
+                                race.get(
+                                    "venue_code"
+                                ),
+                            "Race":
+                                race.get(
+                                    "race_number"
+                                ),
+                            "Race start":
+                                race.get(
+                                    "race_start"
+                                ),
+                            "Race URL":
+                                race.get(
+                                    "race_url"
+                                ),
+                        },
+                    )
+
+                    continue
 
                 minutes_to_start = (
                     race_start - now
@@ -401,28 +522,107 @@ def run_monitor() -> None:
                         f"{error}"
                     )
 
+                    send_dev_alert(
+                        source="MAIN / RACE MONITOR",
+                        message=(
+                            "Race monitoring failed."
+                        ),
+                        error=error,
+                        severity="ERROR",
+                        details={
+                            "Meeting":
+                                race.get(
+                                    "meeting_name"
+                                ),
+                            "Venue code":
+                                race.get(
+                                    "venue_code"
+                                ),
+                            "Race":
+                                race.get(
+                                    "race_number"
+                                ),
+                            "Race start":
+                                race.get(
+                                    "race_start"
+                                ),
+                            "Race URL":
+                                race.get(
+                                    "race_url"
+                                ),
+                        },
+                    )
+
                 finally:
-                    browser_session.close()
+                    try:
+                        browser_session.close()
+
+                    except Exception as error:
+                        print(
+                            "ERROR closing race monitor "
+                            f"browser session: {error}"
+                        )
+
+                        send_dev_alert(
+                            source=(
+                                "MAIN / BROWSER SESSION"
+                            ),
+                            message=(
+                                "Failed to close race "
+                                "monitor browser session."
+                            ),
+                            error=error,
+                            severity="WARNING",
+                            details={
+                                "Meeting":
+                                    race.get(
+                                        "meeting_name"
+                                    ),
+                                "Race":
+                                    race.get(
+                                        "race_number"
+                                    ),
+                            },
+                        )
 
             # =================================================
             # CLEAN OLD POLLING KEYS
             # =================================================
 
-            active_race_keys = {
-                get_race_key(race)
-                for race in races
-            }
+            try:
+                active_race_keys = {
+                    get_race_key(race)
+                    for race in races
+                }
 
-            expired_keys = [
-                race_key
-                for race_key in last_checked
-                if race_key not in active_race_keys
-            ]
-
-            for race_key in expired_keys:
-                del last_checked[
+                expired_keys = [
                     race_key
+                    for race_key
+                    in last_checked
+                    if race_key
+                    not in active_race_keys
                 ]
+
+                for race_key in expired_keys:
+                    del last_checked[
+                        race_key
+                    ]
+
+            except Exception as error:
+                print(
+                    "ERROR cleaning race polling "
+                    f"history: {error}"
+                )
+
+                send_dev_alert(
+                    source="MAIN / POLLING CACHE",
+                    message=(
+                        "Failed to clean expired "
+                        "race polling keys."
+                    ),
+                    error=error,
+                    severity="WARNING",
+                )
 
             # =================================================
             # RESULT MONITORING
@@ -449,6 +649,16 @@ def run_monitor() -> None:
                     print(
                         f"ERROR checking "
                         f"race results: {error}"
+                    )
+
+                    send_dev_alert(
+                        source="MAIN / RESULT MONITOR",
+                        message=(
+                            "Unprocessed race result "
+                            "check failed."
+                        ),
+                        error=error,
+                        severity="ERROR",
                     )
 
                 finally:
@@ -483,10 +693,20 @@ def run_monitor() -> None:
                         f"statistics report: {error}"
                     )
 
+                    send_dev_alert(
+                        source="MAIN / STATS REPORT",
+                        message=(
+                            "Scheduled 7-day statistics "
+                            "report failed."
+                        ),
+                        error=error,
+                        severity="ERROR",
+                    )
+
                 finally:
-                    # Reset the timer even if Discord/report
-                    # generation failed. This prevents a failed
-                    # report from being retried every 30 seconds.
+                    # Reset the timer even if the report
+                    # failed so a fault does not trigger
+                    # another attempt every 30 seconds.
                     last_stats_report = (
                         time.monotonic()
                     )
@@ -525,6 +745,16 @@ def run_monitor() -> None:
                         f"heartbeat: {error}"
                     )
 
+                    send_dev_alert(
+                        source="MAIN / STATUSCAKE",
+                        message=(
+                            "Scheduled StatusCake "
+                            "heartbeat failed."
+                        ),
+                        error=error,
+                        severity="WARNING",
+                    )
+
             # =================================================
             # CYCLE COMPLETE
             # =================================================
@@ -561,6 +791,16 @@ def run_monitor() -> None:
             print(
                 f"ERROR in monitor cycle: "
                 f"{error}"
+            )
+
+            send_dev_alert(
+                source="MAIN / MONITOR LOOP",
+                message=(
+                    "Unhandled exception in the "
+                    "main monitor cycle."
+                ),
+                error=error,
+                severity="ERROR",
             )
 
             print(

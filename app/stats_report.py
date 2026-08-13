@@ -46,6 +46,15 @@ REPORT_DAYS = 7
 
 
 # ============================================================
+# RESULT CODES
+# ============================================================
+
+DID_NOT_PLACE_POSITION = 99
+
+SCRATCHED_POSITION = 100
+
+
+# ============================================================
 # ENVIRONMENT
 # ============================================================
 
@@ -76,11 +85,33 @@ DISCORD_STATS_URL = os.getenv(
 #     99
 #         Did not Place
 #
+#     100
+#         SCR
+#
 # RESULTCHECKED must also equal 1.
 #
+# CHART:
+#
+#     Win
+#     Place
+#     Did not Place
+#     SCR
+#
+# All four categories are included in the 100% stacked
+# chart.
+#
+# PERFORMANCE RATES:
+#
+# SCR runners are still excluded from:
+#
+#     Win %
+#     Place %
+#     Did not Place %
+#     Win or Place %
+#
+# because a scratched runner did not actually participate.
+#
 # Tote has no involvement here.
-# Classification has already been determined by the
-# Fixed Odds result-monitoring logic.
 # ============================================================
 
 def classify_result(
@@ -98,8 +129,17 @@ def classify_result(
     ):
         return "Place"
 
-    if finish_position == 99:
+    if (
+        finish_position
+        == DID_NOT_PLACE_POSITION
+    ):
         return "Did not Place"
+
+    if (
+        finish_position
+        == SCRATCHED_POSITION
+    ):
+        return "SCR"
 
     return None
 
@@ -118,6 +158,18 @@ def get_results():
     Any alert type present in the database during the
     reporting period will automatically appear in the
     statistics report.
+
+    Includes:
+
+        Win
+        Place
+        Did not Place
+        SCR
+
+    Unresolved runners are excluded because:
+
+        RESULTCHECKED must equal 1
+        FINISHPOSITION must not be NULL
     """
 
     conn = sqlite3.connect(
@@ -181,13 +233,16 @@ def get_results():
 
 def get_stats():
     """
-    Build:
+    Build dynamic per-alert statistics.
+
+    Example:
 
         {
             "extreme_price_move_up": {
                 "Win": 2,
                 "Place": 8,
-                "Did not Place": 20
+                "Did not Place": 20,
+                "SCR": 1
             },
 
             "price_shortening": {
@@ -221,6 +276,7 @@ def get_stats():
                 "Win": 0,
                 "Place": 0,
                 "Did not Place": 0,
+                "SCR": 0,
             }
 
         stats[
@@ -322,8 +378,23 @@ def create_chart(
         Did not Place
         Place
         Win
+        SCR
 
-    Each column totals 100%.
+    All resolved runners are included in the chart
+    denominator.
+
+    Therefore each bar represents:
+
+        100% of resolved alerted runners
+
+    including runners that were scratched.
+
+    The label above each bar:
+
+        Runners - X
+
+    is the total number of resolved alerted runners
+    including SCR.
     """
 
     if not stats:
@@ -343,7 +414,12 @@ def create_chart(
     wins = []
     places = []
     did_not_place = []
-    totals = []
+    scratched = []
+    resolved_totals = []
+
+    # ========================================================
+    # CALCULATE PERCENTAGES
+    # ========================================================
 
     for alert_id in alert_ids:
 
@@ -369,33 +445,46 @@ def create_chart(
             ]
         )
 
-        total = (
+        scratched_count = (
+            alert_stats[
+                "SCR"
+            ]
+        )
+
+        resolved_total = (
             win_count
             + place_count
             + did_not_place_count
+            + scratched_count
         )
 
-        totals.append(
-            total
+        resolved_totals.append(
+            resolved_total
         )
 
-        if total > 0:
+        if resolved_total > 0:
 
             wins.append(
                 win_count
-                / total
+                / resolved_total
                 * 100
             )
 
             places.append(
                 place_count
-                / total
+                / resolved_total
                 * 100
             )
 
             did_not_place.append(
                 did_not_place_count
-                / total
+                / resolved_total
+                * 100
+            )
+
+            scratched.append(
+                scratched_count
+                / resolved_total
                 * 100
             )
 
@@ -413,9 +502,13 @@ def create_chart(
                 0
             )
 
-    # --------------------------------------------------------
+            scratched.append(
+                0
+            )
+
+    # ========================================================
     # SCALE WIDTH BASED ON NUMBER OF ALERT TYPES
-    # --------------------------------------------------------
+    # ========================================================
 
     chart_width = max(
         9,
@@ -433,11 +526,18 @@ def create_chart(
         len(alert_ids)
     )
 
-    # --------------------------------------------------------
+    # ========================================================
     # STACKED BARS
     #
-    # Matplotlib chooses the colours automatically.
-    # --------------------------------------------------------
+    # Bottom -> top:
+    #
+    #     Did not Place
+    #     Place
+    #     Win
+    #     SCR
+    #
+    # Matplotlib chooses colours automatically.
+    # ========================================================
 
     axis.bar(
         x_positions,
@@ -468,9 +568,28 @@ def create_chart(
         label="Win"
     )
 
-    # --------------------------------------------------------
+    scratch_bottom = (
+        np.array(
+            did_not_place
+        )
+        + np.array(
+            places
+        )
+        + np.array(
+            wins
+        )
+    )
+
+    axis.bar(
+        x_positions,
+        scratched,
+        bottom=scratch_bottom,
+        label="SCR"
+    )
+
+    # ========================================================
     # PERCENTAGE LABELS INSIDE EACH SEGMENT
-    # --------------------------------------------------------
+    # ========================================================
 
     for index in range(
         len(alert_ids)
@@ -492,6 +611,14 @@ def create_chart(
                     + places[index]
                 )
             ),
+            (
+                scratched[index],
+                (
+                    did_not_place[index]
+                    + places[index]
+                    + wins[index]
+                )
+            ),
         ]
 
         for (
@@ -499,7 +626,7 @@ def create_chart(
             bottom
         ) in segments:
 
-            # Avoid unreadable labels in tiny segments.
+            # Avoid unreadable labels in very small segments.
             if percentage < 4:
                 continue
 
@@ -516,15 +643,17 @@ def create_chart(
                 fontweight="bold",
             )
 
-    # --------------------------------------------------------
+    # ========================================================
     # TOTAL RUNNERS ABOVE EACH BAR
-    # --------------------------------------------------------
+    #
+    # Includes SCR.
+    # ========================================================
 
     for (
         index,
         total
     ) in enumerate(
-        totals
+        resolved_totals
     ):
 
         axis.text(
@@ -536,9 +665,9 @@ def create_chart(
             fontsize=9,
         )
 
-    # --------------------------------------------------------
+    # ========================================================
     # CHART FORMATTING
-    # --------------------------------------------------------
+    # ========================================================
 
     axis.set_ylim(
         0,
@@ -564,7 +693,7 @@ def create_chart(
             0.5,
             1.10
         ),
-        ncol=3,
+        ncol=4,
         frameon=False,
     )
 
@@ -595,9 +724,28 @@ def create_chart(
 def calculate_overall_stats(
     stats
 ):
+    """
+    Calculate overall statistics.
+
+    PERFORMANCE TOTAL:
+
+        Win
+        + Place
+        + Did not Place
+
+    RESOLVED TOTAL:
+
+        Performance Total
+        + SCR
+
+    SCR remains excluded from performance-rate
+    denominators because scratched runners did not run.
+    """
+
     wins = 0
     places = 0
     did_not_place = 0
+    scratched = 0
 
     for alert_stats in stats.values():
 
@@ -619,18 +767,36 @@ def calculate_overall_stats(
             ]
         )
 
-    total = (
+        scratched += (
+            alert_stats[
+                "SCR"
+            ]
+        )
+
+    performance_total = (
         wins
         + places
         + did_not_place
     )
 
+    resolved_total = (
+        performance_total
+        + scratched
+    )
+
     return {
-        "Win": wins,
-        "Place": places,
+        "Win":
+            wins,
+        "Place":
+            places,
         "Did not Place":
             did_not_place,
-        "Total": total,
+        "SCR":
+            scratched,
+        "Performance Total":
+            performance_total,
+        "Resolved Total":
+            resolved_total,
     }
 
 
@@ -653,9 +819,15 @@ def send_to_discord(
         )
     )
 
-    total = (
+    performance_total = (
         overall[
-            "Total"
+            "Performance Total"
+        ]
+    )
+
+    resolved_total = (
+        overall[
+            "Resolved Total"
         ]
     )
 
@@ -677,27 +849,39 @@ def send_to_discord(
         ]
     )
 
+    scratched = (
+        overall[
+            "SCR"
+        ]
+    )
+
+    # ========================================================
+    # PERFORMANCE RATES
+    #
+    # SCR is deliberately excluded from the denominator.
+    # ========================================================
+
     win_rate = (
         wins
-        / total
+        / performance_total
         * 100
-        if total
+        if performance_total
         else 0
     )
 
     place_rate = (
         places
-        / total
+        / performance_total
         * 100
-        if total
+        if performance_total
         else 0
     )
 
     did_not_place_rate = (
         did_not_place
-        / total
+        / performance_total
         * 100
-        if total
+        if performance_total
         else 0
     )
 
@@ -708,17 +892,17 @@ def send_to_discord(
 
     win_or_place_rate = (
         win_or_place
-        / total
+        / performance_total
         * 100
-        if total
+        if performance_total
         else 0
     )
 
     now = datetime.now()
 
-    # --------------------------------------------------------
+    # ========================================================
     # BUILD PER-ALERT TEXT SUMMARY
-    # --------------------------------------------------------
+    # ========================================================
 
     alert_lines = []
 
@@ -727,13 +911,33 @@ def send_to_discord(
         alert_stats
     ) in stats.items():
 
-        alert_total = sum(
-            alert_stats.values()
+        alert_performance_total = (
+            alert_stats[
+                "Win"
+            ]
+            + alert_stats[
+                "Place"
+            ]
+            + alert_stats[
+                "Did not Place"
+            ]
+        )
+
+        alert_scratched = (
+            alert_stats[
+                "SCR"
+            ]
+        )
+
+        alert_resolved_total = (
+            alert_performance_total
+            + alert_scratched
         )
 
         alert_lines.append(
             f"**{alert_id}** — "
-            f"{alert_total} resolved"
+            f"{alert_resolved_total} resolved "
+            f"({alert_scratched} SCR)"
         )
 
     alerts_text = (
@@ -742,16 +946,22 @@ def send_to_discord(
         )
     )
 
-    # --------------------------------------------------------
+    # ========================================================
     # DISCORD MESSAGE
-    # --------------------------------------------------------
+    # ========================================================
 
     content = (
         f"**🐕 ALERTED DOG RESULTS — "
         f"LAST {REPORT_DAYS} DAYS**\n\n"
 
-        f"Completed alerted dogs: "
-        f"**{total}**\n\n"
+        f"Resolved alerted runners: "
+        f"**{resolved_total}**\n"
+
+        f"Runners that participated: "
+        f"**{performance_total}**\n"
+
+        f"SCR: "
+        f"**{scratched}**\n\n"
 
         f"🏆 Wins: "
         f"**{wins} "
@@ -834,7 +1044,9 @@ def main():
     stats = get_stats()
 
     print()
-    print("Stats by alert:")
+    print(
+        "Stats by alert:"
+    )
 
     if not stats:
         print(
@@ -845,13 +1057,32 @@ def main():
 
         return
 
+    # ========================================================
+    # PRINT PER-ALERT STATS
+    # ========================================================
+
     for (
         alert_id,
         alert_stats
     ) in stats.items():
 
-        total = sum(
-            alert_stats.values()
+        performance_total = (
+            alert_stats[
+                "Win"
+            ]
+            + alert_stats[
+                "Place"
+            ]
+            + alert_stats[
+                "Did not Place"
+            ]
+        )
+
+        resolved_total = (
+            performance_total
+            + alert_stats[
+                "SCR"
+            ]
         )
 
         print()
@@ -875,9 +1106,23 @@ def main():
         )
 
         print(
-            f"    Total: "
-            f"{total}"
+            f"    SCR: "
+            f"{alert_stats['SCR']}"
         )
+
+        print(
+            f"    Participated: "
+            f"{performance_total}"
+        )
+
+        print(
+            f"    Resolved: "
+            f"{resolved_total}"
+        )
+
+    # ========================================================
+    # OVERALL STATS
+    # ========================================================
 
     overall = (
         calculate_overall_stats(
@@ -886,12 +1131,48 @@ def main():
     )
 
     print()
+
     print(
-        "Total completed alerted dogs:",
+        "Total resolved alerted runners:",
         overall[
-            "Total"
+            "Resolved Total"
         ]
     )
+
+    print(
+        "Total runners that participated:",
+        overall[
+            "Performance Total"
+        ]
+    )
+
+    print(
+        "Total SCR:",
+        overall[
+            "SCR"
+        ]
+    )
+
+    # ========================================================
+    # CREATE CHART
+    #
+    # The chart can still be generated when every resolved
+    # runner is SCR because SCR itself is now represented.
+    # ========================================================
+
+    if (
+        overall[
+            "Resolved Total"
+        ]
+        == 0
+    ):
+        print()
+        print(
+            "No resolved alerted runners "
+            "are available for the chart."
+        )
+
+        return
 
     print()
     print(

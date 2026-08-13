@@ -30,6 +30,13 @@ TAB_FORM_VENUES_CSV = (
 
 
 # ============================================================
+# RESULT CODES
+# ============================================================
+
+SCRATCHED_POSITION = 100
+
+
+# ============================================================
 # RESULT SCRAPER TIMING
 # ============================================================
 
@@ -148,7 +155,6 @@ def load_tab_form_venue_codes() -> dict[str, dict]:
                     f"CSV row {row_number}: "
                     f"MEETINGNAME is blank."
                 )
-
                 continue
 
             if not form_venue_code:
@@ -158,7 +164,6 @@ def load_tab_form_venue_codes() -> dict[str, dict]:
                     f"FORMVENUECODE is blank "
                     f"for {meeting_name}."
                 )
-
                 continue
 
             if meeting_name in mappings:
@@ -208,6 +213,7 @@ def ordinal_to_position(
         3rd -> 3
         4th -> 4
         10th -> 10
+        21st -> 21
     """
 
     match = re.fullmatch(
@@ -263,6 +269,268 @@ def extract_dollar_values(
     return values
 
 
+def page_is_tab_form(
+    page: Page
+) -> bool:
+    """
+    Return True only when the currently loaded page is
+    hosted on form.tab.com.au.
+
+    TAB Form uses a dedicated Scratchings section that can
+    be parsed safely.
+
+    The normal TAB site must NOT use the same parser because
+    its flattened body text can contain unrelated race,
+    navigation, meeting and market numbers.
+    """
+
+    try:
+        parsed_url = urlparse(
+            page.url
+        )
+
+        return (
+            parsed_url.netloc
+            .lower()
+            == "form.tab.com.au"
+        )
+
+    except Exception:
+        return False
+
+
+# ============================================================
+# TAB FORM SCRATCHING PARSER
+# ============================================================
+
+def parse_scratched_runner_numbers(
+    body_text: str
+) -> list[int]:
+    """
+    Parse runner numbers from TAB Form's dedicated
+    Scratchings section.
+
+    IMPORTANT:
+
+    This function is ONLY valid for TAB Form body text.
+
+    It must not be used against the normal TAB website.
+
+    There is deliberately NO hard-coded upper limit on
+    runner number.
+
+    This keeps the parser compatible with:
+
+        - greyhounds
+        - reserves
+        - thoroughbreds
+        - larger race fields
+    """
+
+    if not body_text:
+        return []
+
+    scratchings_match = re.search(
+        r"(?is)"
+        r"\bScratchings\b"
+        r"\s*"
+        r"(.*?)"
+        r"(?="
+        r"\bSubstitutes\b"
+        r"|"
+        r"\bFIXED ODDS\b"
+        r"|"
+        r"\bLast Updated\b"
+        r"|"
+        r"$"
+        r")",
+        body_text
+    )
+
+    if scratchings_match is None:
+        return []
+
+    scratchings_text = (
+        scratchings_match
+        .group(1)
+        .strip()
+    )
+
+    if not scratchings_text:
+        return []
+
+    if scratchings_text.upper() in {
+        "NIL",
+        "NONE",
+        "NO SCRATCHINGS",
+    }:
+        return []
+
+    runner_numbers = []
+
+    matches = re.findall(
+        r"(?<!\d)"
+        r"(\d{1,2})"
+        r"(?:\([A-Z]+\))?"
+        r"(?!\d)",
+        scratchings_text,
+        re.IGNORECASE
+    )
+
+    for value in matches:
+        try:
+            runner_number = int(
+                value
+            )
+
+        except ValueError:
+            continue
+
+        if runner_number not in runner_numbers:
+            runner_numbers.append(
+                runner_number
+            )
+
+    return runner_numbers
+
+
+def get_runner_name_for_number(
+    page: Page,
+    runner_number: int
+) -> str:
+    """
+    Attempt to retrieve a scratched runner's name.
+
+    Matching ultimately occurs by runner number, so the
+    placeholder is acceptable on historical TAB Form pages
+    where the scratched runner name is unavailable.
+    """
+
+    selectors = [
+        (
+            f'[data-testid="runner-number-{runner_number}"] '
+            f'.runner-name'
+        ),
+        (
+            f'#runner-number-{runner_number} '
+            f'.runner-name'
+        ),
+    ]
+
+    for selector in selectors:
+
+        try:
+            locator = page.locator(
+                selector
+            )
+
+            if locator.count() == 0:
+                continue
+
+            runner_name = (
+                locator
+                .first
+                .inner_text()
+                .strip()
+            )
+
+            if runner_name:
+                return runner_name
+
+        except Exception:
+            continue
+
+    return "SCRATCHED RUNNER"
+
+
+def add_scratched_runners(
+    page: Page,
+    results: list[dict],
+    body_text: str
+) -> list[dict]:
+    """
+    Add scratched runners to an already-published TAB Form
+    result.
+
+    Scratchings are deliberately ignored on normal TAB
+    pages by this function.
+
+    Scratchings by themselves never make a race count as
+    resulted.
+    """
+
+    if not results:
+        return results
+
+    # ========================================================
+    # CRITICAL SAFETY CHECK
+    #
+    # The body-text Scratchings parser is designed only for
+    # TAB Form.
+    #
+    # Never run it against www.tab.com.au.
+    # ========================================================
+
+    if not page_is_tab_form(
+        page
+    ):
+        return results
+
+    scratched_runner_numbers = (
+        parse_scratched_runner_numbers(
+            body_text
+        )
+    )
+
+    if not scratched_runner_numbers:
+        return results
+
+    existing_runner_numbers = {
+        result.get(
+            "runner_number"
+        )
+        for result in results
+    }
+
+    for runner_number in scratched_runner_numbers:
+
+        if runner_number in existing_runner_numbers:
+            continue
+
+        runner_name = (
+            get_runner_name_for_number(
+                page=page,
+                runner_number=runner_number
+            )
+        )
+
+        results.append(
+            {
+                "finish_position":
+                    SCRATCHED_POSITION,
+                "runner_number":
+                    runner_number,
+                "runner_name":
+                    runner_name,
+                "fixed_odds_paid":
+                    False,
+                "fixed_odds_values":
+                    [],
+                "scratched":
+                    True,
+            }
+        )
+
+    results.sort(
+        key=lambda result:
+        result[
+            "finish_position"
+        ]
+    )
+
+    return results
+
+
 # ============================================================
 # BUILD TAB FORM URL
 # ============================================================
@@ -290,7 +558,6 @@ def build_form_url(
             f"WARNING: Unable to parse TAB race URL: "
             f"{race_url}"
         )
-
         return None
 
     meeting_date = (
@@ -387,12 +654,6 @@ def build_form_url(
 
 # ============================================================
 # LEGACY TEXT RESULT PARSER
-#
-# Retained as a fallback for TAB pages where the structured
-# result-table DOM is not available.
-#
-# fixed_odds_paid is UNKNOWN in this fallback, so it is
-# returned as None rather than True/False.
 # ============================================================
 
 def parse_results(
@@ -401,11 +662,8 @@ def parse_results(
     """
     Parse finishing positions from rendered body text.
 
-    This is a fallback parser only.
-
-    It deliberately does NOT attempt to determine whether
-    Fixed Odds paid, because flattened body text cannot
-    reliably distinguish Fixed Odds from Tote.
+    This fallback deliberately does not determine Fixed Odds
+    settlement status.
     """
 
     results_match = re.search(
@@ -476,6 +734,8 @@ def parse_results(
                     None,
                 "fixed_odds_values":
                     [],
+                "scratched":
+                    False,
             }
         )
 
@@ -489,30 +749,6 @@ def parse_results(
 
 # ============================================================
 # STRUCTURED DOM RESULT PARSER
-#
-# IMPORTANT:
-#
-# This is the authoritative parser for Fixed Odds results.
-#
-# TAB Form result table:
-#
-#     table[data-id="race-results"]
-#
-# Each result:
-#
-#     tr.result-item
-#
-# Columns:
-#
-#     1 = finishing position
-#     2 = silk
-#     3 = runner
-#     4 = FIXED ODDS settlement
-#     5 = TOTE settlement
-#
-# ONLY column 4 is inspected for dividends.
-#
-# Column 5 is intentionally ignored.
 # ============================================================
 
 def parse_results_from_dom(
@@ -520,7 +756,9 @@ def parse_results_from_dom(
 ) -> list[dict]:
     """
     Parse official finishing positions and Fixed Odds
-    settlement dividends directly from the result-table DOM.
+    settlement dividends.
+
+    TAB Form scratches are added separately.
 
     Tote is ignored completely.
     """
@@ -556,14 +794,6 @@ def parse_results_from_dom(
 
         cell_count = cells.count()
 
-        # Expected:
-        #
-        # 0 = position
-        # 1 = silk
-        # 2 = runner details
-        # 3 = Fixed Odds
-        # 4 = Tote
-        #
         if cell_count < 4:
             continue
 
@@ -588,13 +818,6 @@ def parse_results_from_dom(
 
         # ----------------------------------------------------
         # RUNNER
-        #
-        # Example:
-        #
-        #     5. RIDGEVIEW VICKY
-        #
-        # runner-details also contains trainer/rider metadata,
-        # so only the first rendered line is used.
         # ----------------------------------------------------
 
         runner_details_text = (
@@ -631,9 +854,9 @@ def parse_results_from_dom(
         # ----------------------------------------------------
         # FIXED ODDS SETTLEMENT COLUMN
         #
-        # THIS IS THE ONLY DIVIDEND COLUMN WE USE.
+        # ONLY Fixed Odds is inspected.
         #
-        # Tote is cell 4 and is NEVER read.
+        # Tote is deliberately ignored.
         # ----------------------------------------------------
 
         fixed_odds_text = (
@@ -664,13 +887,42 @@ def parse_results_from_dom(
                     fixed_odds_paid,
                 "fixed_odds_values":
                     fixed_odds_values,
+                "scratched":
+                    False,
             }
         )
 
-    results.sort(
-        key=lambda result:
-        result["finish_position"]
-    )
+    if not results:
+        return []
+
+    # ========================================================
+    # SCRATCHINGS
+    #
+    # Only TAB Form has the dedicated Scratchings parser.
+    # ========================================================
+
+    if page_is_tab_form(
+        page
+    ):
+
+        try:
+            body_text = (
+                page.locator(
+                    "body"
+                )
+                .inner_text(
+                    timeout=5000
+                )
+            )
+
+        except Exception:
+            body_text = ""
+
+        results = add_scratched_runners(
+            page=page,
+            results=results,
+            body_text=body_text
+        )
 
     return results
 
@@ -691,7 +943,8 @@ def poll_page_for_results(
     Priority:
 
         1. Structured DOM parser
-           -> includes Fixed Odds settlement status
+           -> Fixed Odds settlement status
+           -> TAB Form scratches
 
         2. Legacy body-text parser
            -> finishing position only
@@ -712,7 +965,7 @@ def poll_page_for_results(
 
         try:
             # =================================================
-            # AUTHORITATIVE DOM PARSER
+            # STRUCTURED DOM PARSER
             # =================================================
 
             results = parse_results_from_dom(
@@ -725,14 +978,47 @@ def poll_page_for_results(
                     - start_time
                 )
 
+                finishers = [
+                    result
+                    for result in results
+                    if not result.get(
+                        "scratched",
+                        False
+                    )
+                ]
+
+                scratches = [
+                    result
+                    for result in results
+                    if result.get(
+                        "scratched",
+                        False
+                    )
+                ]
+
                 print(
-                    f"Parsed {len(results)} "
-                    f"finishing position(s) "
+                    f"Parsed "
+                    f"{len(finishers)} "
+                    f"finishing position(s)"
+                    f" and "
+                    f"{len(scratches)} "
+                    f"scratching(s) "
                     f"after {elapsed:.1f}s "
                     f"({attempt_label})."
                 )
 
                 for result in results:
+
+                    if result.get(
+                        "scratched",
+                        False
+                    ):
+                        print(
+                            f"  SCR: "
+                            f"#{result['runner_number']} "
+                            f"{result['runner_name']}"
+                        )
+                        continue
 
                     if (
                         result[
@@ -789,9 +1075,26 @@ def poll_page_for_results(
                     - start_time
                 )
 
+                # ------------------------------------------------
+                # Only TAB Form may augment fallback results with
+                # dedicated Scratchings-section data.
+                # ------------------------------------------------
+
+                if page_is_tab_form(
+                    page
+                ):
+                    fallback_results = (
+                        add_scratched_runners(
+                            page=page,
+                            results=fallback_results,
+                            body_text=body_text
+                        )
+                    )
+
                 print(
-                    f"Parsed {len(fallback_results)} "
-                    f"finishing position(s) "
+                    f"Parsed "
+                    f"{len(fallback_results)} "
+                    f"result record(s) "
                     f"using text fallback "
                     f"after {elapsed:.1f}s "
                     f"({attempt_label})."
@@ -800,7 +1103,8 @@ def poll_page_for_results(
                 print(
                     "WARNING: Fixed Odds settlement "
                     "status could not be determined "
-                    "from the text fallback."
+                    "for ordinary finishers from "
+                    "the text fallback."
                 )
 
                 return (
@@ -833,10 +1137,13 @@ def poll_page_for_results(
 def print_page_diagnostics(
     body_text: str,
     max_wait_seconds: int,
-    attempt_label: str
+    attempt_label: str,
+    is_form_page: bool
 ) -> None:
     """
     Print diagnostics for an unsuccessful result scrape.
+
+    Scratchings are only parsed/displayed for TAB Form.
     """
 
     body_contains_results = (
@@ -903,6 +1210,26 @@ def print_page_diagnostics(
         f"{body_contains_fourth}"
     )
 
+    if is_form_page:
+
+        scratchings = (
+            parse_scratched_runner_numbers(
+                body_text
+            )
+        )
+
+        print(
+            f"  TAB Form scratchings detected: "
+            f"{scratchings}"
+        )
+
+    else:
+
+        print(
+            "  Scratchings check: "
+            "SKIPPED on normal TAB page"
+        )
+
 
 # ============================================================
 # SCRAPE ONE URL
@@ -916,14 +1243,12 @@ def scrape_results_from_url(
     Load one TAB race page and parse its official results.
 
     Normal TAB:
-        one polling cycle.
+        Result parsing only.
+
+        TAB Form Scratchings parser is NEVER used.
 
     TAB Form:
-        one polling cycle, then one reload/retry.
-
-    Structured DOM parsing is preferred because it allows
-    Fixed Odds settlement dividends to be identified while
-    completely ignoring Tote.
+        Result parsing plus dedicated Scratchings section.
     """
 
     print(
@@ -971,7 +1296,8 @@ def scrape_results_from_url(
             max_wait_seconds=(
                 NORMAL_TAB_MAX_WAIT_SECONDS
             ),
-            attempt_label="normal TAB"
+            attempt_label="normal TAB",
+            is_form_page=False
         )
 
         return []
@@ -1064,7 +1390,8 @@ def scrape_results_from_url(
             max_wait_seconds=(
                 FORM_TAB_MAX_WAIT_SECONDS
             ),
-            attempt_label=attempt_label
+            attempt_label=attempt_label,
+            is_form_page=True
         )
 
     print(
@@ -1077,11 +1404,6 @@ def scrape_results_from_url(
 
 # ============================================================
 # LEGACY COMBINED GETTER
-#
-# Retained for compatibility with any other module that still
-# imports get_race_results().
-#
-# results_monitor.py currently uses isolated browser sessions.
 # ============================================================
 
 def get_race_results(
@@ -1170,6 +1492,13 @@ def get_race_winner(
     )
 
     for result in results:
+
+        if result.get(
+            "scratched",
+            False
+        ):
+            continue
+
         if (
             result["finish_position"]
             == 1

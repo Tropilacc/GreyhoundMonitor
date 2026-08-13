@@ -4,8 +4,22 @@ from pathlib import Path
 from models import Runner
 
 
-DATABASE_PATH = Path("data") / "greyhound.db"
+DATABASE_PATH = (
+    Path("data")
+    / "greyhound.db"
+)
 
+
+# ============================================================
+# RESULT CODES
+# ============================================================
+
+SCRATCHED_POSITION = 100
+
+
+# ============================================================
+# DATABASE CONNECTION
+# ============================================================
 
 def connect_database() -> sqlite3.Connection:
     DATABASE_PATH.parent.mkdir(
@@ -13,16 +27,25 @@ def connect_database() -> sqlite3.Connection:
         exist_ok=True
     )
 
-    print(f"Database: {DATABASE_PATH}")
+    print(
+        f"Database: "
+        f"{DATABASE_PATH}"
+    )
 
     connection = sqlite3.connect(
         DATABASE_PATH
     )
 
-    print("Connected successfully.")
+    print(
+        "Connected successfully."
+    )
 
     return connection
 
+
+# ============================================================
+# SCHEMA HELPERS
+# ============================================================
 
 def column_exists(
     connection: sqlite3.Connection,
@@ -43,10 +66,15 @@ def column_exists(
     columns = cursor.fetchall()
 
     return any(
-        column[1].upper() == column_name.upper()
+        column[1].upper()
+        == column_name.upper()
         for column in columns
     )
 
+
+# ============================================================
+# CREATE / UPGRADE TABLES
+# ============================================================
 
 def create_tables(
     connection: sqlite3.Connection
@@ -62,6 +90,14 @@ def create_tables(
 
     REMINDER_HISTORY:
         Stores one pre-race reminder per race.
+
+    SCRATCH_HISTORY:
+        Stores one successful scratched-runner Discord
+        notification per runner.
+
+        This prevents a scratched alerted runner from
+        generating the same notification every monitoring
+        cycle.
     """
 
     cursor = connection.cursor()
@@ -181,7 +217,7 @@ def create_tables(
     # ========================================================
     # REMINDER HISTORY
     #
-    # One record per RACE, not per runner.
+    # One record per race, not per runner.
     # ========================================================
 
     cursor.execute(
@@ -195,10 +231,48 @@ def create_tables(
 
     connection.commit()
 
-    print("RUNNERS table ready.")
-    print("ALERT_HISTORY table ready.")
-    print("REMINDER_HISTORY table ready.")
+    # ========================================================
+    # SCRATCH HISTORY
+    #
+    # One record per runner.
+    #
+    # A row is inserted only AFTER the scratched-runner
+    # Discord notification has been accepted successfully.
+    #
+    # This allows automatic retry if Discord fails.
+    # ========================================================
 
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS SCRATCH_HISTORY (
+            RUNNERID TEXT PRIMARY KEY,
+            SENTAT TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+        """
+    )
+
+    connection.commit()
+
+    print(
+        "RUNNERS table ready."
+    )
+
+    print(
+        "ALERT_HISTORY table ready."
+    )
+
+    print(
+        "REMINDER_HISTORY table ready."
+    )
+
+    print(
+        "SCRATCH_HISTORY table ready."
+    )
+
+
+# ============================================================
+# RUNNERS
+# ============================================================
 
 def save_runner(
     connection: sqlite3.Connection,
@@ -208,6 +282,7 @@ def save_runner(
     Insert or update a runner.
 
     INITIALPRICE remains the first observed price.
+
     CURRENTPRICE is updated on later checks.
     """
 
@@ -306,6 +381,10 @@ def get_runner(
     )
 
 
+# ============================================================
+# ALERT HISTORY
+# ============================================================
+
 def has_alert_been_sent(
     connection: sqlite3.Connection,
     runner_id: str,
@@ -332,7 +411,10 @@ def has_alert_been_sent(
         )
     )
 
-    return cursor.fetchone() is not None
+    return (
+        cursor.fetchone()
+        is not None
+    )
 
 
 def mark_alert_as_sent(
@@ -364,6 +446,94 @@ def mark_alert_as_sent(
     )
 
     connection.commit()
+
+
+def get_alert_ids_for_runner(
+    connection: sqlite3.Connection,
+    runner_id: str
+) -> list[str]:
+    """
+    Return every alert ID that has fired for a runner.
+
+    Example:
+
+        [
+            "extreme_price_move_up",
+            "price_shortening"
+        ]
+
+    The list is used when a previously alerted runner
+    becomes scratched so all relevant Discord roles can
+    be notified in one message.
+    """
+
+    cursor = connection.cursor()
+
+    cursor.execute(
+        """
+        SELECT ALERTID
+        FROM ALERT_HISTORY
+        WHERE RUNNERID = ?
+        ORDER BY SENTAT, ALERTID;
+        """,
+        (
+            runner_id,
+        )
+    )
+
+    rows = cursor.fetchall()
+
+    alert_ids = []
+
+    for row in rows:
+
+        alert_id = row[0]
+
+        if not alert_id:
+            continue
+
+        if alert_id in alert_ids:
+            continue
+
+        alert_ids.append(
+            alert_id
+        )
+
+    return alert_ids
+
+
+def runner_has_any_alert(
+    connection: sqlite3.Connection,
+    runner_id: str
+) -> bool:
+    """
+    Return True if this runner has triggered at least
+    one price alert.
+
+    This is used by live scratching detection.
+
+    Non-alerted scratched runners do not need a scratch
+    Discord notification.
+    """
+
+    cursor = connection.cursor()
+
+    cursor.execute(
+        """
+        SELECT 1
+        FROM ALERT_HISTORY
+        WHERE RUNNERID = ?
+        LIMIT 1;
+        """,
+        (
+            runner_id,
+        )
+    )
+
+    return (
+        cursor.fetchone()
+        is not None
+    )
 
 
 def get_alerted_runners_for_race(
@@ -423,27 +593,47 @@ def get_alerted_runners_for_race(
     runners = {}
 
     for row in rows:
+
         runner_id = row[0]
 
         if runner_id not in runners:
-            runners[runner_id] = {
-                "runner_id": row[0],
-                "meeting_date": row[1],
-                "meeting_name": row[2] or "",
-                "venue_code": row[3],
-                "race_number": row[4],
-                "race_start": row[5] or "",
-                "runner_number": row[6],
-                "runner_name": row[7],
-                "initial_price": row[8],
-                "current_price": row[9],
-                "alerts": []
+            runners[
+                runner_id
+            ] = {
+                "runner_id":
+                    row[0],
+                "meeting_date":
+                    row[1],
+                "meeting_name":
+                    row[2] or "",
+                "venue_code":
+                    row[3],
+                "race_number":
+                    row[4],
+                "race_start":
+                    row[5] or "",
+                "runner_number":
+                    row[6],
+                "runner_name":
+                    row[7],
+                "initial_price":
+                    row[8],
+                "current_price":
+                    row[9],
+                "alerts":
+                    []
             }
 
-        runners[runner_id]["alerts"].append(
+        runners[
+            runner_id
+        ][
+            "alerts"
+        ].append(
             {
-                "alert_id": row[10],
-                "alert_price": row[11]
+                "alert_id":
+                    row[10],
+                "alert_price":
+                    row[11]
             }
         )
 
@@ -451,6 +641,109 @@ def get_alerted_runners_for_race(
         runners.values()
     )
 
+
+# ============================================================
+# SCRATCH HISTORY
+# ============================================================
+
+def has_scratch_alert_been_sent(
+    connection: sqlite3.Connection,
+    runner_id: str
+) -> bool:
+    """
+    Return True if a scratched-runner notification has
+    already been successfully sent for this runner.
+    """
+
+    cursor = connection.cursor()
+
+    cursor.execute(
+        """
+        SELECT 1
+        FROM SCRATCH_HISTORY
+        WHERE RUNNERID = ?
+        LIMIT 1;
+        """,
+        (
+            runner_id,
+        )
+    )
+
+    return (
+        cursor.fetchone()
+        is not None
+    )
+
+
+def mark_scratch_alert_as_sent(
+    connection: sqlite3.Connection,
+    runner_id: str
+) -> None:
+    """
+    Record that the scratched-runner Discord notification
+    was successfully sent.
+
+    This should only be called after Discord accepts the
+    scratch notification.
+    """
+
+    cursor = connection.cursor()
+
+    cursor.execute(
+        """
+        INSERT OR IGNORE INTO SCRATCH_HISTORY (
+            RUNNERID
+        )
+        VALUES (?);
+        """,
+        (
+            runner_id,
+        )
+    )
+
+    connection.commit()
+
+
+def mark_runner_as_scratched(
+    connection: sqlite3.Connection,
+    runner_id: str
+) -> None:
+    """
+    Resolve all alerts for this runner as scratched.
+
+    Result code:
+
+        FINISHPOSITION = 100
+        RESULTCHECKED = 1
+
+    This is safe to call more than once.
+
+    The update applies only to ALERT_HISTORY rows belonging
+    to this runner.
+    """
+
+    cursor = connection.cursor()
+
+    cursor.execute(
+        """
+        UPDATE ALERT_HISTORY
+        SET
+            FINISHPOSITION = ?,
+            RESULTCHECKED = 1
+        WHERE RUNNERID = ?;
+        """,
+        (
+            SCRATCHED_POSITION,
+            runner_id
+        )
+    )
+
+    connection.commit()
+
+
+# ============================================================
+# REMINDER HISTORY
+# ============================================================
 
 def has_race_reminder_been_sent(
     connection: sqlite3.Connection,
@@ -475,7 +768,10 @@ def has_race_reminder_been_sent(
         )
     )
 
-    return cursor.fetchone() is not None
+    return (
+        cursor.fetchone()
+        is not None
+    )
 
 
 def mark_race_reminder_as_sent(
@@ -503,6 +799,10 @@ def mark_race_reminder_as_sent(
     connection.commit()
 
 
+# ============================================================
+# RESULT PROCESSING
+# ============================================================
+
 def save_finish_position(
     connection: sqlite3.Connection,
     runner_id: str,
@@ -511,6 +811,20 @@ def save_finish_position(
     """
     Save finishing position against every alert
     generated by this runner.
+
+    Known result codes:
+
+        1
+            Win
+
+        2-98
+            Exact placing
+
+        99
+            Did not Place
+
+        100
+            Scratched
     """
 
     cursor = connection.cursor()
@@ -562,6 +876,12 @@ def get_unchecked_alert_runners(
     """
     Return alerted runners whose result has not
     yet been processed.
+
+    A runner marked as scratched receives:
+
+        RESULTCHECKED = 1
+
+    and therefore no longer appears here.
     """
 
     cursor = connection.cursor()
@@ -582,7 +902,8 @@ def get_unchecked_alert_runners(
         INNER JOIN ALERT_HISTORY A
             ON A.RUNNERID = R.RUNNERID
 
-        WHERE A.RESULTCHECKED = 0
+        WHERE
+            A.RESULTCHECKED = 0
 
         ORDER BY
             R.MEETINGDATE,
@@ -596,14 +917,22 @@ def get_unchecked_alert_runners(
 
     return [
         {
-            "runner_id": row[0],
-            "meeting_date": row[1],
-            "meeting_name": row[2],
-            "venue_code": row[3],
-            "race_number": row[4],
-            "race_start": row[5],
-            "runner_number": row[6],
-            "runner_name": row[7]
+            "runner_id":
+                row[0],
+            "meeting_date":
+                row[1],
+            "meeting_name":
+                row[2],
+            "venue_code":
+                row[3],
+            "race_number":
+                row[4],
+            "race_start":
+                row[5],
+            "runner_number":
+                row[6],
+            "runner_name":
+                row[7]
         }
         for row in rows
     ]

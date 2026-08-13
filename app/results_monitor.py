@@ -16,6 +16,7 @@ from result_scraper import (
 
 RESULT_CHECK_DELAY_MINUTES = 20
 
+
 # ============================================================
 # RESULT POSITION RULES
 #
@@ -32,7 +33,7 @@ RESULT_CHECK_DELAY_MINUTES = 20
 #         Power BI:
 #             Win
 #
-#     2-10
+#     2-98
 #         Runner was explicitly listed in that finishing
 #         position AND TAB paid a Fixed Odds dividend.
 #
@@ -50,7 +51,12 @@ RESULT_CHECK_DELAY_MINUTES = 20
 #             - runner not listed in the published
 #               TAB/Form result rows
 #
-#         Tote is ignored completely.
+#     100
+#         SCRATCHED.
+#
+#         This takes priority over Fixed Odds dividend
+#         status because a scratched runner will naturally
+#         have no Fixed Odds dividend.
 #
 # IMPORTANT:
 #
@@ -58,10 +64,20 @@ RESULT_CHECK_DELAY_MINUTES = 20
 # placed.
 #
 # The Fixed Odds settlement dividend determines whether
-# the runner is treated as Win / Place / Did not Place.
+# a non-scratched runner is treated as:
+#
+#     Win
+#     Place
+#     Did not Place
+#
+# SCRATCHED is handled separately and always remains 100.
+#
+# Tote is ignored completely.
 # ============================================================
 
 DID_NOT_PLACE_POSITION = 99
+
+SCRATCHED_POSITION = 100
 
 
 def build_race_url(
@@ -238,26 +254,66 @@ def results_have_fixed_odds_status(
     results: list[dict]
 ) -> bool:
     """
-    Return True only when every parsed result has a known
-    Fixed Odds settlement status.
+    Return True only when every parsed result has enough
+    settlement information for final classification.
 
-    Structured DOM results contain:
+    NORMAL RESULT:
 
-        fixed_odds_paid = True / False
+        fixed_odds_paid must be True or False.
+
+    SCRATCHED RESULT:
+
+        finish_position = 100
+
+        Fixed Odds dividend status is irrelevant because
+        the runner did not participate.
+
+    This means a SCR record remains usable even though
+    fixed_odds_paid will normally be False.
 
     The legacy flattened-text fallback contains:
 
         fixed_odds_paid = None
 
-    Because Tote must be ignored completely, results with
-    an unknown Fixed Odds status are not sufficient for
-    final classification.
+    for ordinary finishing positions, so those results are
+    not sufficient for final classification.
+
+    Tote is ignored completely.
     """
 
     if not results:
         return False
 
     for result in results:
+
+        finish_position = (
+            result.get(
+                "finish_position"
+            )
+        )
+
+        try:
+            finish_position = int(
+                finish_position
+            )
+
+        except (
+            TypeError,
+            ValueError
+        ):
+            return False
+
+        # ----------------------------------------------------
+        # SCRATCHED RESULT
+        #
+        # No Fixed Odds settlement is required.
+        # ----------------------------------------------------
+
+        if (
+            finish_position
+            == SCRATCHED_POSITION
+        ):
+            continue
 
         fixed_odds_paid = (
             result.get(
@@ -278,7 +334,14 @@ def get_results_with_isolated_sessions(
     Retrieve official race results using completely
     separate browser sessions for normal TAB and TAB Form.
 
-    Fixed Odds settlement information is mandatory.
+    Fixed Odds settlement information is mandatory for
+    ordinary results.
+
+    SCRATCHED results are accepted as:
+
+        FINISHPOSITION = 100
+
+    without requiring a Fixed Odds dividend.
 
     If the normal TAB page returns finishing positions but
     Fixed Odds settlement status is unknown, that result is
@@ -315,7 +378,8 @@ def get_results_with_isolated_sessions(
             ):
                 print(
                     "Official result with Fixed Odds "
-                    "settlement found on normal TAB page."
+                    "settlement / scratch status found "
+                    "on normal TAB page."
                 )
 
                 return results
@@ -383,7 +447,8 @@ def get_results_with_isolated_sessions(
             ):
                 print(
                     "Official result with Fixed Odds "
-                    "settlement found on TAB Form page."
+                    "settlement / scratch status found "
+                    "on TAB Form page."
                 )
 
                 return results
@@ -428,14 +493,18 @@ def process_race_results(
         (True, resolved_runner_count)
 
             At least one usable official result was
-            published with known Fixed Odds settlement
+            published with known settlement / scratch
             status and alerted runners were processed.
 
         (False, 0)
 
-            No usable Fixed Odds result was available.
+            No usable result was available.
 
     FINAL CLASSIFICATION:
+
+        Runner explicitly marked SCR:
+            FINISHPOSITION = 100
+            -> SCR
 
         Runner listed 1st
         AND Fixed Odds dividend paid:
@@ -456,6 +525,8 @@ def process_race_results(
             FINISHPOSITION = 99
             -> Did not Place
 
+        SCR takes priority over Fixed Odds settlement.
+
         Tote is ignored completely.
     """
 
@@ -464,12 +535,12 @@ def process_race_results(
     )
 
     # ========================================================
-    # NO USABLE FIXED ODDS RESULT YET
+    # NO USABLE RESULT YET
     # ========================================================
 
     if not results:
         print(
-            "Official Fixed Odds result "
+            "Official Fixed Odds result / scratch status "
             "not available yet."
         )
 
@@ -477,26 +548,6 @@ def process_race_results(
 
     # ========================================================
     # BUILD PUBLISHED RESULT LOOKUP
-    #
-    # Example:
-    #
-    # {
-    #     5: {
-    #         "finish_position": 1,
-    #         "fixed_odds_paid": True,
-    #         "fixed_odds_values": [8.00, 2.20]
-    #     },
-    #     8: {
-    #         "finish_position": 2,
-    #         "fixed_odds_paid": True,
-    #         "fixed_odds_values": [1.80]
-    #     },
-    #     4: {
-    #         "finish_position": 4,
-    #         "fixed_odds_paid": False,
-    #         "fixed_odds_values": []
-    #     }
-    # }
     # ========================================================
 
     published_results = {}
@@ -528,13 +579,17 @@ def process_race_results(
             )
         )
 
+        scratched = (
+            result.get(
+                "scratched",
+                False
+            )
+        )
+
         if runner_number is None:
             continue
 
         if finish_position is None:
-            continue
-
-        if fixed_odds_paid is None:
             continue
 
         try:
@@ -552,15 +607,46 @@ def process_race_results(
         ):
             continue
 
+        # ----------------------------------------------------
+        # FINISHPOSITION 100 IS AUTHORITATIVE.
+        #
+        # Also preserve an explicit scratched=True flag if
+        # result_scraper.py provides one.
+        # ----------------------------------------------------
+
+        is_scratched = (
+            finish_position
+            == SCRATCHED_POSITION
+            or bool(
+                scratched
+            )
+        )
+
+        if is_scratched:
+            finish_position = (
+                SCRATCHED_POSITION
+            )
+
+            fixed_odds_paid = False
+
+            fixed_odds_values = []
+
+        elif fixed_odds_paid is None:
+            continue
+
         published_results[
             runner_number
         ] = {
             "finish_position":
                 finish_position,
             "fixed_odds_paid":
-                bool(fixed_odds_paid),
+                bool(
+                    fixed_odds_paid
+                ),
             "fixed_odds_values":
                 fixed_odds_values,
+            "scratched":
+                is_scratched,
         }
 
     # ========================================================
@@ -571,7 +657,7 @@ def process_race_results(
         print(
             "Official result data was returned, "
             "but no usable Fixed Odds settlement "
-            "records could be parsed."
+            "or scratch records could be parsed."
         )
 
         print(
@@ -583,8 +669,8 @@ def process_race_results(
     print(
         f"Official published result contains "
         f"{len(published_results)} "
-        f"runner(s) with known Fixed Odds "
-        f"settlement status."
+        f"runner(s) with known settlement "
+        f"or scratch status."
     )
 
     # ========================================================
@@ -596,7 +682,9 @@ def process_race_results(
     resolved_runner_count = 0
 
     try:
-        create_tables(database)
+        create_tables(
+            database
+        )
 
         for alerted_runner in alerted_runners:
 
@@ -671,6 +759,56 @@ def process_race_results(
                 ]
             )
 
+            scratched = (
+                published_result[
+                    "scratched"
+                ]
+            )
+
+            # =================================================
+            # SCRATCHED
+            #
+            # THIS MUST BE CHECKED BEFORE:
+            #
+            #     if not fixed_odds_paid
+            #
+            # because a scratched runner naturally has no
+            # Fixed Odds dividend.
+            #
+            # SCR is always:
+            #
+            #     FINISHPOSITION = 100
+            #
+            # save_finish_position() also marks:
+            #
+            #     RESULTCHECKED = 1
+            # =================================================
+
+            if (
+                scratched
+                or finish_position
+                == SCRATCHED_POSITION
+            ):
+
+                save_finish_position(
+                    database,
+                    runner_id,
+                    SCRATCHED_POSITION
+                )
+
+                resolved_runner_count += 1
+
+                print(
+                    f"Result saved: "
+                    f"{alerted_runner['venue_code']} "
+                    f"R{alerted_runner['race_number']} "
+                    f"#{runner_number} "
+                    f"{runner_name} - "
+                    f"SCR"
+                )
+
+                continue
+
             # =================================================
             # LISTED BUT NO FIXED ODDS DIVIDEND
             #
@@ -678,8 +816,8 @@ def process_race_results(
             #
             #     4th GOLD CARD
             #
-            #     Tote may show a dividend elsewhere,
-            #     but Fixed Odds result cell is blank.
+            # Tote may show a dividend elsewhere,
+            # but Fixed Odds result cell is blank.
             #
             #     -> DID NOT PLACE
             # =================================================
@@ -736,7 +874,7 @@ def process_race_results(
             if finish_position == 1:
 
                 result_text = (
-                    f"1st - WIN"
+                    "1st - WIN"
                 )
 
             else:
@@ -763,7 +901,10 @@ def process_race_results(
     finally:
         database.close()
 
-    return True, resolved_runner_count
+    return (
+        True,
+        resolved_runner_count
+    )
 
 
 def get_unresolved_summary() -> tuple[int, int]:
@@ -780,7 +921,9 @@ def get_unresolved_summary() -> tuple[int, int]:
     database = connect_database()
 
     try:
-        create_tables(database)
+        create_tables(
+            database
+        )
 
         unresolved_runners = (
             get_unchecked_alert_runners(
@@ -839,7 +982,9 @@ def check_unprocessed_results() -> None:
     database = connect_database()
 
     try:
-        create_tables(database)
+        create_tables(
+            database
+        )
 
         unchecked_runners = (
             get_unchecked_alert_runners(
@@ -852,15 +997,29 @@ def check_unprocessed_results() -> None:
 
     if not unchecked_runners:
         print()
-        print("No unresolved alerted results.")
+        print(
+            "No unresolved alerted results."
+        )
 
         print()
-        print("RESULT MONITOR SUMMARY")
-        print("----------------------")
-        print("Processed races: 0")
-        print("Resolved runners: 0")
-        print("Unresolved races: 0")
-        print("Unresolved runners: 0")
+        print(
+            "RESULT MONITOR SUMMARY"
+        )
+        print(
+            "----------------------"
+        )
+        print(
+            "Processed races: 0"
+        )
+        print(
+            "Resolved runners: 0"
+        )
+        print(
+            "Unresolved races: 0"
+        )
+        print(
+            "Unresolved runners: 0"
+        )
 
         return
 
@@ -868,7 +1027,9 @@ def check_unprocessed_results() -> None:
     # GROUP ALERTED RUNNERS BY RACE
     # ========================================================
 
-    races = defaultdict(list)
+    races = defaultdict(
+        list
+    )
 
     for runner in unchecked_runners:
 
@@ -894,8 +1055,12 @@ def check_unprocessed_results() -> None:
     )
 
     print()
-    print("RESULT MONITOR START")
-    print("--------------------")
+    print(
+        "RESULT MONITOR START"
+    )
+    print(
+        "--------------------"
+    )
 
     print(
         f"Unresolved races: "
@@ -1024,8 +1189,12 @@ def check_unprocessed_results() -> None:
     # ========================================================
 
     print()
-    print("RESULT MONITOR SUMMARY")
-    print("----------------------")
+    print(
+        "RESULT MONITOR SUMMARY"
+    )
+    print(
+        "----------------------"
+    )
 
     print(
         f"Processed races: "
