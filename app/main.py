@@ -7,7 +7,12 @@ from monitor import monitor_race
 from race_finder import get_todays_greyhound_races
 from reminders import check_race_reminders
 from results_monitor import check_unprocessed_results
+from stats_report import get_stats, send_to_discord, create_chart
 
+
+# ============================================================
+# TIMING SETTINGS
+# ============================================================
 
 MAIN_LOOP_SECONDS = 30
 
@@ -15,6 +20,60 @@ RESULT_CHECK_INTERVAL_SECONDS = 60
 
 HEARTBEAT_INTERVAL_SECONDS = 5 * 60
 
+STATS_REPORT_INTERVAL_SECONDS = 6 * 60 * 60
+
+
+# ============================================================
+# STATISTICS REPORT
+# ============================================================
+
+def run_stats_report() -> None:
+    """
+    Generate and send the current 7-day statistics report.
+
+    This function is deliberately isolated from the main
+    monitoring loop so a statistics/reporting failure cannot
+    stop race monitoring.
+    """
+
+    print()
+    print(
+        "Generating scheduled 7-day "
+        "statistics report..."
+    )
+
+    stats = get_stats()
+
+    if not stats:
+        print(
+            "No resolved alerted runners found "
+            "for statistics report."
+        )
+        return
+
+    chart_created = create_chart(
+        stats
+    )
+
+    if not chart_created:
+        print(
+            "Statistics chart could not be created."
+        )
+        return
+
+    send_to_discord(
+        stats
+    )
+
+    print(
+        "Discord statistics report "
+        "sent successfully."
+    )
+
+
+# ============================================================
+# RACE POLLING INTERVAL
+# ============================================================
 
 def get_poll_interval(
     minutes_to_start: float
@@ -47,6 +106,10 @@ def get_poll_interval(
     return 60
 
 
+# ============================================================
+# RACE KEY
+# ============================================================
+
 def get_race_key(
     race: dict
 ) -> str:
@@ -61,6 +124,10 @@ def get_race_key(
     )
 
 
+# ============================================================
+# PARSE RACE START
+# ============================================================
+
 def parse_race_start(
     race: dict
 ) -> datetime:
@@ -73,6 +140,10 @@ def parse_race_start(
         "%Y-%m-%d %H:%M"
     )
 
+
+# ============================================================
+# MAIN MONITOR
+# ============================================================
 
 def run_monitor() -> None:
     """
@@ -92,6 +163,11 @@ def run_monitor() -> None:
     STATUSCAKE:
         Immediate heartbeat on startup, followed
         by a heartbeat approximately every 5 minutes.
+
+    STATISTICS:
+        Immediate 7-day statistics report on startup,
+        followed by another report approximately
+        every 6 hours while the monitor is running.
     """
 
     print()
@@ -122,6 +198,23 @@ def run_monitor() -> None:
             f"heartbeat: {error}"
         )
 
+    # ========================================================
+    # INITIAL STATISTICS REPORT
+    #
+    # Every fresh start/restart of main.py sends the current
+    # 7-day statistics report immediately.
+    # ========================================================
+
+    try:
+        run_stats_report()
+
+    except Exception as error:
+        print()
+        print(
+            f"ERROR sending initial statistics "
+            f"report: {error}"
+        )
+
     print()
 
     # ========================================================
@@ -145,6 +238,17 @@ def run_monitor() -> None:
     # ========================================================
 
     last_heartbeat = time.monotonic()
+
+    # ========================================================
+    # STATISTICS TIMER
+    #
+    # The initial report has already been sent above.
+    #
+    # Start the 6-hour timer now so the next report occurs
+    # approximately 6 hours after startup/restart.
+    # ========================================================
+
+    last_stats_report = time.monotonic()
 
     while True:
         try:
@@ -349,6 +453,41 @@ def run_monitor() -> None:
 
                 finally:
                     last_result_check = (
+                        time.monotonic()
+                    )
+
+            # =================================================
+            # STATISTICS REPORT
+            # =================================================
+
+            current_monotonic = (
+                time.monotonic()
+            )
+
+            seconds_since_stats_report = (
+                current_monotonic
+                - last_stats_report
+            )
+
+            if (
+                seconds_since_stats_report
+                >= STATS_REPORT_INTERVAL_SECONDS
+            ):
+                try:
+                    run_stats_report()
+
+                except Exception as error:
+                    print()
+                    print(
+                        f"ERROR sending scheduled "
+                        f"statistics report: {error}"
+                    )
+
+                finally:
+                    # Reset the timer even if Discord/report
+                    # generation failed. This prevents a failed
+                    # report from being retried every 30 seconds.
+                    last_stats_report = (
                         time.monotonic()
                     )
 
