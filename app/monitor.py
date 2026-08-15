@@ -6,13 +6,9 @@ from alerts import ALERTS
 from database import (
     connect_database,
     create_tables,
-    get_alert_ids_for_runner,
     get_runner,
     has_alert_been_sent,
-    has_scratch_alert_been_sent,
     mark_alert_as_sent,
-    mark_runner_as_scratched,
-    mark_scratch_alert_as_sent,
     save_runner,
 )
 from dev_alerts import send_dev_alert
@@ -22,21 +18,20 @@ from notifications import (
     get_role_id,
     send_discord_message,
 )
-from scraper import get_race_prices
+from scraper_tab import get_race_prices
 
 
 # ============================================================
 # ALERT TIMING
+#
+# Odds continue to be monitored until +5 minutes after the
+# scheduled race start. That window is controlled by main.py.
+#
+# New alerts are only allowed until +1 minute after the
+# scheduled race start.
 # ============================================================
 
 ALERT_CUTOFF_MINUTES_AFTER_START = 1
-
-
-# ============================================================
-# RESULT CODES
-# ============================================================
-
-SCRATCHED_POSITION = 100
 
 
 # ============================================================
@@ -62,30 +57,6 @@ def build_runner_id(
 
 
 # ============================================================
-# ALERT LOOKUP
-# ============================================================
-
-def get_alert_by_id(
-    alert_id: str
-):
-    """
-    Find an alert definition from alerts.py by ID.
-
-    Historical ALERT_HISTORY rows may refer to alerts
-    that have since been removed or renamed.
-
-    In that case, return None.
-    """
-
-    for alert in ALERTS:
-
-        if alert.id == alert_id:
-            return alert
-
-    return None
-
-
-# ============================================================
 # ALERT CUTOFF
 # ============================================================
 
@@ -103,8 +74,11 @@ def are_alerts_allowed(
     Alerts are blocked:
         More than 1 minute after scheduled start
 
-    Price monitoring itself continues through +5 minutes,
-    controlled separately by main.py.
+    Price monitoring itself continues through +5 minutes
+    because that is controlled separately by main.py.
+
+    If race_start cannot be parsed, alerts fail closed so
+    an invalid race time cannot cause late alerts.
     """
 
     try:
@@ -153,7 +127,7 @@ def are_alerts_allowed(
 
 
 # ============================================================
-# PRICE ALERT MESSAGE
+# ALERT MESSAGE
 # ============================================================
 
 def build_alert_message(
@@ -161,7 +135,7 @@ def build_alert_message(
     alert
 ) -> str:
     """
-    Build the Discord message for a price alert.
+    Build the Discord message for any alert rule.
     """
 
     price_change = (
@@ -219,315 +193,6 @@ def build_alert_message(
 
 
 # ============================================================
-# SCRATCH MESSAGE
-# ============================================================
-
-def build_scratch_message(
-    meeting_name: str,
-    venue_code: str,
-    race_number: int,
-    runner_number: int,
-    runner_name: str,
-    alert_ids: list[str]
-) -> str:
-    """
-    Build one Discord notification when a previously
-    alerted runner becomes scratched.
-    """
-
-    alert_names = []
-
-    for alert_id in alert_ids:
-
-        alert = get_alert_by_id(
-            alert_id
-        )
-
-        if alert is not None:
-            alert_name = (
-                alert.name
-            )
-
-        else:
-            alert_name = (
-                alert_id
-                .replace("_", " ")
-                .title()
-            )
-
-        if alert_name not in alert_names:
-            alert_names.append(
-                alert_name
-            )
-
-    if alert_names:
-
-        alert_lines = "\n".join(
-            f"• {alert_name}"
-            for alert_name in alert_names
-        )
-
-    else:
-
-        alert_lines = (
-            "• Previous Greyhound Tracker alert"
-        )
-
-    return (
-        "🚫 **GREYHOUND SCRATCHED** 🚫\n\n"
-        f"**{runner_name}**\n"
-        f"{meeting_name} "
-        f"({venue_code}) "
-        f"R{race_number} "
-        f"— Box {runner_number}\n\n"
-        f"This runner previously triggered:\n"
-        f"{alert_lines}\n\n"
-        f"TAB is now showing this runner as "
-        f"**SCRATCHED (SCR)**.\n\n"
-        f"The runner will not participate in the race."
-    )
-
-
-# ============================================================
-# SCRATCH ROLE IDS
-# ============================================================
-
-def get_scratch_role_ids(
-    alert_ids: list[str]
-) -> list[str]:
-    """
-    Return Discord role IDs for a scratch notification.
-
-    Includes:
-
-        1. ALL Alerts role
-        2. Specific role for every previous alert type
-
-    Duplicate roles are removed.
-    """
-
-    role_ids = []
-
-    all_alerts_role_id = (
-        get_all_alerts_role_id()
-    )
-
-    if all_alerts_role_id:
-        role_ids.append(
-            all_alerts_role_id
-        )
-
-    for alert_id in alert_ids:
-
-        alert = get_alert_by_id(
-            alert_id
-        )
-
-        if alert is None:
-            continue
-
-        role_id = get_role_id(
-            alert.role_env_name
-        )
-
-        if not role_id:
-            continue
-
-        if role_id in role_ids:
-            continue
-
-        role_ids.append(
-            role_id
-        )
-
-    return role_ids
-
-
-# ============================================================
-# PROCESS LIVE SCRATCH
-# ============================================================
-
-def process_live_scratch(
-    connection,
-    meeting_date: str,
-    meeting_name: str,
-    venue_code: str,
-    race_number: int,
-    runner_number: int,
-    runner_name: str,
-    race_url: str
-) -> bool:
-    """
-    Process one runner explicitly marked scratched by
-    scraper.py.
-
-    Returns True if the runner had at least one previous
-    alert.
-
-    Returns False if the runner was never alerted.
-
-    For an alerted scratched runner:
-
-        FINISHPOSITION = 100
-        RESULTCHECKED = 1
-
-    are saved immediately.
-
-    Discord scratch history is recorded only after Discord
-    successfully accepts the notification.
-    """
-
-    runner_id = build_runner_id(
-        meeting_date=meeting_date,
-        venue_code=venue_code,
-        race_number=race_number,
-        runner_number=runner_number
-    )
-
-    alert_ids = get_alert_ids_for_runner(
-        connection,
-        runner_id
-    )
-
-    # --------------------------------------------------------
-    # NOT PREVIOUSLY ALERTED
-    #
-    # Still print the scratch so terminal output confirms
-    # that the scraper detected it correctly.
-    # --------------------------------------------------------
-
-    if not alert_ids:
-
-        print(
-            f"SCRATCHED: "
-            f"{venue_code} "
-            f"R{race_number} "
-            f"#{runner_number} "
-            f"{runner_name} | "
-            f"No previous alerts."
-        )
-
-        return False
-
-    # --------------------------------------------------------
-    # RESOLVE RESULT AS SCR
-    # --------------------------------------------------------
-
-    mark_runner_as_scratched(
-        connection,
-        runner_id
-    )
-
-    print(
-        f"SCRATCHED: "
-        f"{venue_code} "
-        f"R{race_number} "
-        f"#{runner_number} "
-        f"{runner_name} | "
-        f"FINISHPOSITION = "
-        f"{SCRATCHED_POSITION}"
-    )
-
-    # --------------------------------------------------------
-    # ALREADY NOTIFIED
-    # --------------------------------------------------------
-
-    if has_scratch_alert_been_sent(
-        connection,
-        runner_id
-    ):
-        print(
-            f"Scratch notification already sent for "
-            f"{venue_code} "
-            f"R{race_number} "
-            f"#{runner_number} "
-            f"{runner_name}."
-        )
-
-        return True
-
-    # --------------------------------------------------------
-    # SEND SCRATCH NOTIFICATION
-    # --------------------------------------------------------
-
-    try:
-        message = build_scratch_message(
-            meeting_name=meeting_name,
-            venue_code=venue_code,
-            race_number=race_number,
-            runner_number=runner_number,
-            runner_name=runner_name,
-            alert_ids=alert_ids
-        )
-
-        role_ids = get_scratch_role_ids(
-            alert_ids
-        )
-
-        send_discord_message(
-            message,
-            role_ids=role_ids
-        )
-
-        mark_scratch_alert_as_sent(
-            connection,
-            runner_id
-        )
-
-        print(
-            f"Discord scratch notification sent "
-            f"successfully for "
-            f"{venue_code} "
-            f"R{race_number} "
-            f"#{runner_number} "
-            f"{runner_name}."
-        )
-
-    except Exception as error:
-        print(
-            f"ERROR sending scratch notification for "
-            f"{meeting_name} "
-            f"R{race_number} "
-            f"#{runner_number} "
-            f"{runner_name}: "
-            f"{error}"
-        )
-
-        send_dev_alert(
-            source="RACE MONITOR / SCRATCH ALERT",
-            message=(
-                "A previously alerted runner was "
-                "scratched, but its Discord scratch "
-                "notification could not be sent."
-            ),
-            error=error,
-            severity="ERROR",
-            details={
-                "Runner ID":
-                    runner_id,
-                "Meeting":
-                    meeting_name,
-                "Venue code":
-                    venue_code,
-                "Race":
-                    race_number,
-                "Runner":
-                    runner_number,
-                "Runner name":
-                    runner_name,
-                "Previous alert IDs":
-                    ", ".join(
-                        alert_ids
-                    ),
-                "Race URL":
-                    race_url,
-            },
-        )
-
-    return True
-
-
-# ============================================================
 # MONITOR ONE RACE
 # ============================================================
 
@@ -541,35 +206,36 @@ def monitor_race(
     race_start: str
 ) -> None:
     """
-    Scrape and process one TAB greyhound race.
+    Scrape one TAB greyhound race.
 
-    scraper.py provides the authoritative runner market state:
+    The monitor:
 
-        current_price
-        scratched
+    - Updates runner prices.
+    - Stores meeting information.
+    - Stores the scheduled race start.
+    - Continues recording prices through +5 minutes,
+      as controlled by main.py.
+    - Allows new alerts only through +1 minute after
+      the scheduled race start.
+    - Evaluates every active alert rule while alerts
+      are permitted.
+    - Sends qualifying Discord alerts.
+    - Pings ALL Alerts subscribers.
+    - Pings the role subscribed to the specific alert.
+    - Stores the exact price at which each alert fired.
 
-    LIVE SCRATCH FLOW:
+    DEV FAULT REPORTING:
 
-        scratched=True
-            ↓
-        check ALERT_HISTORY
-            ↓
-        if previously alerted:
-            FINISHPOSITION = 100
-            RESULTCHECKED = 1
-            send one Discord scratch notification
-            record SCRATCH_HISTORY
-
-    A runner with:
-
-        current_price=None
-        scratched=False
-
-    is treated as an unavailable market, NOT as scratched.
+    - Scraper failures are handled by scraper_tab.py.
+    - Invalid alert timing is reported here.
+    - Discord alert failures are reported here.
+    - Database / unexpected failures are allowed to
+      propagate to main.py, where they are reported by
+      the MAIN / RACE MONITOR DEV handler.
     """
 
     # ========================================================
-    # SCRAPE CURRENT RUNNER MARKET STATE
+    # SCRAPE CURRENT PRICES
     # ========================================================
 
     scraped_runners = get_race_prices(
@@ -582,10 +248,19 @@ def monitor_race(
             "No runner prices found."
         )
 
+        # scraper_tab.py already sends the detailed DEV warning
+        # for a zero-runner scrape, so do not send a duplicate
+        # notification here.
+
         return
 
     # ========================================================
-    # ALERT CUTOFF
+    # DETERMINE WHETHER NEW ALERTS ARE STILL ALLOWED
+    #
+    # This is calculated after the scrape so that the actual
+    # time at which prices are being processed is used.
+    #
+    # Even when False, runner prices are still saved below.
     # ========================================================
 
     alerts_allowed = are_alerts_allowed(
@@ -612,63 +287,28 @@ def monitor_race(
         )
 
         # ====================================================
-        # PROCESS RUNNERS
+        # PROCESS SCRAPED RUNNERS
         # ====================================================
 
         for scraped_runner in scraped_runners:
-
-            runner_number = scraped_runner[
-                "runner_number"
-            ]
-
-            runner_name = scraped_runner[
-                "runner_name"
-            ]
-
-            scratched = scraped_runner.get(
-                "scratched",
-                False
-            )
-
-            # =================================================
-            # SCRATCHED RUNNER
-            #
-            # This MUST occur before current_price is checked.
-            #
-            # Scratched runners normally have:
-            #
-            #     current_price = None
-            # =================================================
-
-            if scratched:
-
-                process_live_scratch(
-                    connection=database,
-                    meeting_date=meeting_date,
-                    meeting_name=meeting_name,
-                    venue_code=venue_code,
-                    race_number=race_number,
-                    runner_number=runner_number,
-                    runner_name=runner_name,
-                    race_url=race_url
-                )
-
-                continue
-
-            # =================================================
-            # ACTIVE RUNNER PRICE
-            # =================================================
 
             current_price = scraped_runner[
                 "current_price"
             ]
 
             # ------------------------------------------------
-            # MISSING PRICE, BUT NOT SCRATCHED
+            # RUNNER HAS NO CURRENT FIXED WIN PRICE
+            #
+            # This can be normal for scratchings or unavailable
+            # Fixed Odds markets, so it is not a DEV fault.
             # ------------------------------------------------
 
             if current_price is None:
                 continue
+
+            runner_number = scraped_runner[
+                "runner_number"
+            ]
 
             runner_id = build_runner_id(
                 meeting_date=meeting_date,
@@ -685,13 +325,19 @@ def monitor_race(
                 race_number=race_number,
                 race_start=race_start,
                 runner_number=runner_number,
-                runner_name=runner_name,
+                runner_name=scraped_runner[
+                    "runner_name"
+                ],
                 initial_price=current_price,
                 current_price=current_price
             )
 
             # =================================================
-            # SAVE LATEST PRICE
+            # ALWAYS SAVE THE LATEST PRICE
+            #
+            # This continues even after the alert cutoff.
+            #
+            # INITIALPRICE remains preserved by save_runner().
             # =================================================
 
             save_runner(
@@ -730,7 +376,9 @@ def monitor_race(
                         "Runner":
                             runner_number,
                         "Runner name":
-                            runner_name,
+                            scraped_runner[
+                                "runner_name"
+                            ],
                     },
                 )
 
@@ -748,7 +396,15 @@ def monitor_race(
             )
 
             # =================================================
-            # PRICE ALERT CUTOFF
+            # ALERT CUTOFF
+            #
+            # After scheduled start +1 minute:
+            #
+            # - Price is still saved.
+            # - CURRENTPRICE is still updated.
+            # - No alert rules are evaluated.
+            # - No Discord alerts are sent.
+            # - No ALERT_HISTORY rows are created.
             # =================================================
 
             if not alerts_allowed:
@@ -756,9 +412,24 @@ def monitor_race(
 
             # =================================================
             # GENERIC ALERT ENGINE
+            #
+            # Every active rule in alerts.py is evaluated.
+            #
+            # Every price alert pings:
+            #
+            # 1. ALL Alerts role
+            # 2. The role assigned to this specific alert
             # =================================================
 
             for alert in ALERTS:
+
+                # ------------------------------------------------
+                # EVALUATE ALERT RULE
+                #
+                # If an alert condition itself throws an exception,
+                # report it to DEV but continue processing other
+                # alert rules / runners.
+                # ------------------------------------------------
 
                 try:
                     alert_triggered = (
@@ -810,6 +481,10 @@ def monitor_race(
                 if not alert_triggered:
                     continue
 
+                # ------------------------------------------------
+                # ALREADY SENT CHECK
+                # ------------------------------------------------
+
                 if has_alert_been_sent(
                     database,
                     stored_runner.runner_id,
@@ -846,7 +521,10 @@ def monitor_race(
                 )
 
                 # =================================================
-                # SEND PRICE ALERT
+                # SEND DISCORD PRICE ALERT
+                #
+                # ALERT_HISTORY is written ONLY after Discord
+                # successfully accepts the alert.
                 # =================================================
 
                 try:
@@ -872,6 +550,11 @@ def monitor_race(
                             specific_alert_role_id
                         ]
                     )
+
+                    # ---------------------------------------------
+                    # RECORD ONLY AFTER DISCORD ACCEPTS
+                    # THE NOTIFICATION
+                    # ---------------------------------------------
 
                     mark_alert_as_sent(
                         database,
