@@ -4,8 +4,10 @@ from datetime import datetime
 from browser_session import BrowserSession
 from dev_alerts import send_dev_alert
 from heartbeat import send_heartbeat
-from monitor import monitor_race
-from race_finder import get_todays_greyhound_races
+from monitor_tab import monitor_race
+from monitor_sportsbet import monitor_sportsbet_race
+from race_finder_tab import get_todays_greyhound_races
+from race_finder_sportsbet import get_todays_sportsbet_greyhound_races
 from reminders import check_race_reminders
 from results_monitor import check_unprocessed_results
 from stats_report import (
@@ -259,7 +261,8 @@ def run_monitor() -> None:
     # IN-MEMORY PRICE POLLING HISTORY
     # ========================================================
 
-    last_checked = {}
+    last_checked_tab = {}
+    last_checked_sportsbet = {}
 
     # ========================================================
     # RESULT TIMER
@@ -326,7 +329,41 @@ def run_monitor() -> None:
                 continue
 
             print(
-                f"Eligible races: {len(races)}"
+                f"TAB eligible races: {len(races)}"
+            )
+
+
+            # =================================================
+            # DISCOVER SPORTSBET RACES
+            # =================================================
+
+            try:
+                sportsbet_races = (
+                    get_todays_sportsbet_greyhound_races()
+                )
+
+            except Exception as error:
+                print()
+                print(
+                    f"ERROR discovering Sportsbet "
+                    f"greyhound races: {error}"
+                )
+
+                send_dev_alert(
+                    source="MAIN / SPORTSBET RACE FINDER",
+                    message=(
+                        "Failed to discover Sportsbet "
+                        "greyhound races."
+                    ),
+                    error=error,
+                    severity="ERROR",
+                )
+
+                sportsbet_races = []
+
+            print(
+                f"Sportsbet eligible races: "
+                f"{len(sportsbet_races)}"
             )
 
             races_checked_this_cycle = 0
@@ -438,7 +475,7 @@ def run_monitor() -> None:
                 )
 
                 previous_check = (
-                    last_checked.get(
+                    last_checked_tab.get(
                         race_key
                     )
                 )
@@ -508,7 +545,7 @@ def run_monitor() -> None:
                         ]
                     )
 
-                    last_checked[
+                    last_checked_tab[
                         race_key
                     ] = datetime.now()
 
@@ -586,6 +623,131 @@ def run_monitor() -> None:
                         )
 
             # =================================================
+            # SPORTSBET PRICE MONITORING
+            # =================================================
+
+            for race in sportsbet_races:
+
+                try:
+                    race_start = parse_race_start(
+                        race
+                    )
+
+                except Exception as error:
+                    print(
+                        f"ERROR parsing Sportsbet race start for "
+                        f"{race.get('meeting_name')} "
+                        f"R{race.get('race_number')}: "
+                        f"{error}"
+                    )
+
+                    send_dev_alert(
+                        source="MAIN / SPORTSBET RACE DATA",
+                        message=(
+                            "Sportsbet race start time could not "
+                            "be parsed."
+                        ),
+                        error=error,
+                        severity="ERROR",
+                        details={
+                            "Meeting": race.get("meeting_name"),
+                            "Venue code": race.get("venue_code"),
+                            "Race": race.get("race_number"),
+                            "Race start": race.get("race_start"),
+                            "Race URL": race.get("race_url"),
+                        },
+                    )
+
+                    continue
+
+                minutes_to_start = (
+                    race_start - now
+                ).total_seconds() / 60
+
+                if minutes_to_start < -5:
+                    continue
+
+                if minutes_to_start > 180:
+                    continue
+
+                race_key = get_race_key(
+                    race
+                )
+
+                poll_interval = get_poll_interval(
+                    minutes_to_start
+                )
+
+                previous_check = (
+                    last_checked_sportsbet.get(
+                        race_key
+                    )
+                )
+
+                if previous_check is not None:
+                    seconds_since_check = (
+                        now - previous_check
+                    ).total_seconds()
+
+                    if seconds_since_check < poll_interval:
+                        continue
+
+                if minutes_to_start >= 0:
+                    timing_text = (
+                        f"{minutes_to_start:.0f} min to start"
+                    )
+
+                else:
+                    timing_text = (
+                        f"{abs(minutes_to_start):.0f} "
+                        f"min past scheduled start"
+                    )
+
+                print()
+                print(
+                    f"Monitoring Sportsbet "
+                    f"{race['meeting_name']} "
+                    f"R{race['race_number']} "
+                    f"({timing_text})"
+                )
+
+                try:
+                    monitor_sportsbet_race(
+                        race_url=race["race_url"]
+                    )
+
+                    last_checked_sportsbet[
+                        race_key
+                    ] = datetime.now()
+
+                    races_checked_this_cycle += 1
+
+                except Exception as error:
+                    print(
+                        f"ERROR monitoring Sportsbet "
+                        f"{race['meeting_name']} "
+                        f"R{race['race_number']}: "
+                        f"{error}"
+                    )
+
+                    send_dev_alert(
+                        source="MAIN / SPORTSBET MONITOR",
+                        message=(
+                            "Sportsbet race monitoring failed."
+                        ),
+                        error=error,
+                        severity="ERROR",
+                        details={
+                            "Meeting": race.get("meeting_name"),
+                            "Venue code": race.get("venue_code"),
+                            "Race": race.get("race_number"),
+                            "Race start": race.get("race_start"),
+                            "Race URL": race.get("race_url"),
+                        },
+                    )
+
+
+            # =================================================
             # CLEAN OLD POLLING KEYS
             # =================================================
 
@@ -598,13 +760,13 @@ def run_monitor() -> None:
                 expired_keys = [
                     race_key
                     for race_key
-                    in last_checked
+                    in last_checked_tab
                     if race_key
                     not in active_race_keys
                 ]
 
                 for race_key in expired_keys:
-                    del last_checked[
+                    del last_checked_tab[
                         race_key
                     ]
 
@@ -816,3 +978,6 @@ def run_monitor() -> None:
 
 if __name__ == "__main__":
     run_monitor()
+
+
+

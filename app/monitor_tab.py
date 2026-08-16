@@ -10,6 +10,7 @@ from database import (
     has_alert_been_sent,
     mark_alert_as_sent,
     save_runner,
+    save_runner_price,
 )
 from dev_alerts import send_dev_alert
 from models import Runner
@@ -343,6 +344,26 @@ def monitor_race(
             save_runner(
                 database,
                 runner
+            )
+
+            # Store TAB pricing in the generic bookmaker table.
+            #
+            # TAB currently has no reliable published opening
+            # price, so OPENING_PRICE remains NULL.
+            #
+            # INITIAL_OBSERVED_PRICE is automatically preserved
+            # by save_runner_price() from the first TAB observation.
+
+            save_runner_price(
+                connection=database,
+                runner_id=runner_id,
+                bookmaker="TAB",
+                current_price=current_price,
+                opening_price=None,
+                place_price=None,
+                source_runner_id=None,
+                scratched=False,
+                market_mover=False,
             )
 
             stored_runner = get_runner(

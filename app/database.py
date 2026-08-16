@@ -83,7 +83,37 @@ def create_tables(
     Create and upgrade all tracker database tables.
 
     RUNNERS:
-        Stores runner details, race metadata and prices.
+        Stores the core runner identity, race metadata and
+        the existing TAB price fields.
+
+        INITIALPRICE and CURRENTPRICE remain in this table
+        for backwards compatibility with the existing TAB
+        alert engine.
+
+    RUNNER_PRICES:
+        Stores bookmaker-specific pricing for each runner.
+
+        One runner can therefore have separate rows for:
+
+            TAB
+            SPORTSBET
+            LADBROKES
+            etc.
+
+        The primary key is:
+
+            RUNNERID + BOOKMAKER
+
+        OPENING_PRICE:
+            The bookmaker's genuine published opening price,
+            when available.
+
+        INITIAL_OBSERVED_PRICE:
+            The first price GreyhoundMonitor personally
+            observed from that bookmaker.
+
+        CURRENT_PRICE:
+            The latest Win price observed.
 
     ALERT_HISTORY:
         Stores each price alert that fired.
@@ -148,6 +178,54 @@ def create_tables(
             ADD COLUMN RACESTART TEXT;
             """
         )
+
+    connection.commit()
+
+    # ========================================================
+    # RUNNER PRICES
+    #
+    # Generic bookmaker-specific pricing table.
+    #
+    # One row per:
+    #
+    #     RUNNERID + BOOKMAKER
+    #
+    # Examples:
+    #
+    #     2026-08-15|WP|5|4 + TAB
+    #     2026-08-15|WP|5|4 + SPORTSBET
+    #     2026-08-15|WP|5|4 + LADBROKES
+    #
+    # The existing RUNNERS price columns remain untouched
+    # until the new multi-bookmaker architecture is fully
+    # integrated.
+    # ========================================================
+
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS RUNNER_PRICES (
+            RUNNERID TEXT NOT NULL,
+            BOOKMAKER TEXT NOT NULL,
+
+            SOURCE_RUNNER_ID TEXT,
+
+            OPENING_PRICE REAL,
+            INITIAL_OBSERVED_PRICE REAL,
+            CURRENT_PRICE REAL,
+            PLACE_PRICE REAL,
+
+            SCRATCHED INTEGER NOT NULL DEFAULT 0,
+            MARKET_MOVER INTEGER NOT NULL DEFAULT 0,
+
+            LAST_SEEN TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+            PRIMARY KEY (
+                RUNNERID,
+                BOOKMAKER
+            )
+        );
+        """
+    )
 
     connection.commit()
 
@@ -258,6 +336,10 @@ def create_tables(
     )
 
     print(
+        "RUNNER_PRICES table ready."
+    )
+
+    print(
         "ALERT_HISTORY table ready."
     )
 
@@ -284,6 +366,12 @@ def save_runner(
     INITIALPRICE remains the first observed price.
 
     CURRENTPRICE is updated on later checks.
+
+    These fields currently represent the existing TAB
+    monitoring architecture.
+
+    Multi-bookmaker prices are stored separately in
+    RUNNER_PRICES.
     """
 
     cursor = connection.cursor()
@@ -379,6 +467,297 @@ def get_runner(
         initial_price=row[8],
         current_price=row[9]
     )
+
+
+# ============================================================
+# RUNNER PRICES
+# ============================================================
+
+def save_runner_price(
+    connection: sqlite3.Connection,
+    runner_id: str,
+    bookmaker: str,
+    current_price: float | None,
+    opening_price: float | None = None,
+    place_price: float | None = None,
+    source_runner_id: str | int | None = None,
+    scratched: bool = False,
+    market_mover: bool = False
+) -> None:
+    """
+    Insert or update one bookmaker-specific runner price.
+
+    BOOKMAKER is normalised to uppercase.
+
+    INITIAL_OBSERVED_PRICE is written only when the row is
+    first created and is never replaced on later checks.
+
+    OPENING_PRICE may initially be NULL. If the bookmaker
+    later provides an opening price, the existing NULL value
+    can be populated.
+
+    CURRENT_PRICE and PLACE_PRICE always represent the latest
+    observation.
+
+    SCRATCHED and MARKET_MOVER represent the latest state.
+
+    LAST_SEEN is refreshed every time the row is updated.
+    """
+
+    bookmaker_name = (
+        bookmaker
+        .strip()
+        .upper()
+    )
+
+    if not bookmaker_name:
+        raise ValueError(
+            "Bookmaker cannot be blank."
+        )
+
+    source_runner_id_text = None
+
+    if source_runner_id is not None:
+        source_runner_id_text = str(
+            source_runner_id
+        )
+
+    cursor = connection.cursor()
+
+    cursor.execute(
+        """
+        INSERT INTO RUNNER_PRICES (
+            RUNNERID,
+            BOOKMAKER,
+            SOURCE_RUNNER_ID,
+            OPENING_PRICE,
+            INITIAL_OBSERVED_PRICE,
+            CURRENT_PRICE,
+            PLACE_PRICE,
+            SCRATCHED,
+            MARKET_MOVER,
+            LAST_SEEN
+        )
+        VALUES (
+            ?, ?, ?, ?, ?, ?, ?, ?, ?,
+            CURRENT_TIMESTAMP
+        )
+
+        ON CONFLICT(
+            RUNNERID,
+            BOOKMAKER
+        )
+        DO UPDATE SET
+
+            SOURCE_RUNNER_ID =
+                COALESCE(
+                    excluded.SOURCE_RUNNER_ID,
+                    RUNNER_PRICES.SOURCE_RUNNER_ID
+                ),
+
+            OPENING_PRICE =
+                COALESCE(
+                    excluded.OPENING_PRICE,
+                    RUNNER_PRICES.OPENING_PRICE
+                ),
+
+            CURRENT_PRICE =
+                excluded.CURRENT_PRICE,
+
+            PLACE_PRICE =
+                excluded.PLACE_PRICE,
+
+            SCRATCHED =
+                excluded.SCRATCHED,
+
+            MARKET_MOVER =
+                excluded.MARKET_MOVER,
+
+            LAST_SEEN =
+                CURRENT_TIMESTAMP;
+        """,
+        (
+            runner_id,
+            bookmaker_name,
+            source_runner_id_text,
+            opening_price,
+            current_price,
+            current_price,
+            place_price,
+            int(scratched),
+            int(market_mover)
+        )
+    )
+
+    connection.commit()
+
+
+def get_runner_price(
+    connection: sqlite3.Connection,
+    runner_id: str,
+    bookmaker: str
+) -> dict | None:
+    """
+    Return one bookmaker-specific pricing row.
+
+    Returns None if the runner/bookmaker combination
+    does not exist.
+    """
+
+    bookmaker_name = (
+        bookmaker
+        .strip()
+        .upper()
+    )
+
+    cursor = connection.cursor()
+
+    cursor.execute(
+        """
+        SELECT
+            RUNNERID,
+            BOOKMAKER,
+            SOURCE_RUNNER_ID,
+            OPENING_PRICE,
+            INITIAL_OBSERVED_PRICE,
+            CURRENT_PRICE,
+            PLACE_PRICE,
+            SCRATCHED,
+            MARKET_MOVER,
+            LAST_SEEN
+        FROM RUNNER_PRICES
+
+        WHERE
+            RUNNERID = ?
+            AND BOOKMAKER = ?;
+        """,
+        (
+            runner_id,
+            bookmaker_name
+        )
+    )
+
+    row = cursor.fetchone()
+
+    if row is None:
+        return None
+
+    return {
+        "runner_id":
+            row[0],
+
+        "bookmaker":
+            row[1],
+
+        "source_runner_id":
+            row[2],
+
+        "opening_price":
+            row[3],
+
+        "initial_observed_price":
+            row[4],
+
+        "current_price":
+            row[5],
+
+        "place_price":
+            row[6],
+
+        "scratched":
+            bool(row[7]),
+
+        "market_mover":
+            bool(row[8]),
+
+        "last_seen":
+            row[9]
+    }
+
+
+def get_runner_prices(
+    connection: sqlite3.Connection,
+    runner_id: str
+) -> list[dict]:
+    """
+    Return all bookmaker pricing rows for one runner.
+
+    Example result:
+
+        [
+            {
+                "bookmaker": "TAB",
+                ...
+            },
+            {
+                "bookmaker": "SPORTSBET",
+                ...
+            }
+        ]
+    """
+
+    cursor = connection.cursor()
+
+    cursor.execute(
+        """
+        SELECT
+            RUNNERID,
+            BOOKMAKER,
+            SOURCE_RUNNER_ID,
+            OPENING_PRICE,
+            INITIAL_OBSERVED_PRICE,
+            CURRENT_PRICE,
+            PLACE_PRICE,
+            SCRATCHED,
+            MARKET_MOVER,
+            LAST_SEEN
+        FROM RUNNER_PRICES
+
+        WHERE RUNNERID = ?
+
+        ORDER BY BOOKMAKER;
+        """,
+        (
+            runner_id,
+        )
+    )
+
+    rows = cursor.fetchall()
+
+    return [
+        {
+            "runner_id":
+                row[0],
+
+            "bookmaker":
+                row[1],
+
+            "source_runner_id":
+                row[2],
+
+            "opening_price":
+                row[3],
+
+            "initial_observed_price":
+                row[4],
+
+            "current_price":
+                row[5],
+
+            "place_price":
+                row[6],
+
+            "scratched":
+                bool(row[7]),
+
+            "market_mover":
+                bool(row[8]),
+
+            "last_seen":
+                row[9]
+        }
+        for row in rows
+    ]
 
 
 # ============================================================
