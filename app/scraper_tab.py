@@ -962,41 +962,42 @@ def get_race_prices(
         body_characters = 0
         fixed_odds_present = False
 
-    send_dev_alert(
-        source="SCRAPER",
-        message=(
-            "Race page produced no usable "
-            "Fixed Odds runner prices."
-        ),
-        severity="WARNING",
-        details={
-            "Race URL":
-                race_url,
-            "Page title":
-                page_title,
-            "Runner rows detected":
-                len(
-                    last_standard_runners
-                ),
-            "Scratched runners detected":
-                count_scratched_runners(
-                    last_standard_runners
-                ),
-            "Usable standard prices":
-                count_usable_prices(
-                    last_standard_runners
-                ),
-            "Usable fallback prices":
-                fallback_price_count,
-            "Fallback scratches":
-                fallback_scratched_count,
-            "Body characters":
-                body_characters,
-            "Fixed Odds text present":
-                fixed_odds_present,
-            "Price wait seconds":
-                PRICE_RENDER_WAIT_SECONDS,
-        },
-    )
+    if not last_standard_runners and not fallback_runners:
+            send_dev_alert(
+                source="SCRAPER",
+                message=(
+                    "Race page produced no usable "
+                "Fixed Odds runner prices."
+            ),
+            severity="WARNING",
+            details={
+                "Race URL":
+                    race_url,
+                "Page title":
+                    page_title,
+                "Runner rows detected":
+                    len(
+                        last_standard_runners
+                    ),
+                "Scratched runners detected":
+                    count_scratched_runners(
+                        last_standard_runners
+                    ),
+                "Usable standard prices":
+                    count_usable_prices(
+                        last_standard_runners
+                    ),
+                "Usable fallback prices":
+                    fallback_price_count,
+                "Fallback scratches":
+                    fallback_scratched_count,
+                "Body characters":
+                    body_characters,
+                "Fixed Odds text present":
+                    fixed_odds_present,
+                "Price wait seconds":
+                    PRICE_RENDER_WAIT_SECONDS,
+            },
+        )
 
     return []

@@ -26,16 +26,6 @@ def make_slug(
     """
     Convert a Sportsbet meeting name into the slug used
     in Sportsbet race URLs.
-
-    Example:
-
-        Capalaba
-            ->
-        capalaba
-
-        The Meadows
-            ->
-        the-meadows
     """
 
     value = (
@@ -65,22 +55,6 @@ def get_sportsbet_region_slug(
     """
     Determine the Sportsbet URL region from the competition
     record.
-
-    Sportsbet exposes fields such as:
-
-        regionId:
-            australia
-
-        regionType:
-            DOMESTIC
-
-    Australian and New Zealand greyhound meetings use:
-
-        australia-nz
-
-    Other meetings use:
-
-        international
     """
 
     region_id = (
@@ -163,30 +137,31 @@ def build_sportsbet_race_url(
 
 
 # ============================================================
-# FIND SPORTSBET RACES
+# DISCOVER SPORTSBET SCHEDULE
 # ============================================================
 
-def get_todays_sportsbet_greyhound_races() -> list[dict]:
+def _discover_todays_sportsbet_schedule() -> dict:
     """
-    Discover Sportsbet greyhound races eligible for
-    bookmaker-price monitoring.
+    Discover today's Sportsbet greyhound schedule.
 
-    Only meetings that have an existing mapping in:
-
-        data/bookmaker_venues.csv
-
-    are returned.
-
-    This prevents Sportsbet meeting names from being
-    converted into guessed TAB venue codes.
+    Returns:
+        {
+            "eligible_races": [...],
+            "next_future_race": {...} | None
+        }
 
     Eligible races are:
-
         - No more than 3 hours before scheduled start.
         - No more than 5 minutes after scheduled start.
 
-    Sportsbet discovery uses one request to the general
-    greyhound landing page.
+    next_future_race is the earliest mapped greyhound race
+    that is more than 3 hours away.
+
+    Only meetings with an existing mapping in:
+
+        data/bookmaker_venues.csv
+
+    are considered.
     """
 
     now = datetime.now()
@@ -230,7 +205,8 @@ def get_todays_sportsbet_greyhound_races() -> list[dict]:
         {}
     )
 
-    races = []
+    eligible_races = []
+    next_future_race = None
 
     mapped_meetings = 0
     unmapped_meetings = 0
@@ -280,8 +256,7 @@ def get_todays_sportsbet_greyhound_races() -> list[dict]:
         #
         # Other racing codes can appear in the general
         # Sportsbet racing state even when loading the
-        # greyhound landing page, so they must be filtered
-        # out before venue mapping or race monitoring.
+        # greyhound landing page.
 
         if competition.get("classId") != 4:
             continue
@@ -352,20 +327,6 @@ def get_todays_sportsbet_greyhound_races() -> list[dict]:
                 )
             )
 
-            # -------------------------------------------------
-            # MORE THAN 3 HOURS AWAY
-            # -------------------------------------------------
-
-            if race_start > monitor_until:
-                continue
-
-            # -------------------------------------------------
-            # MORE THAN 5 MINUTES PAST START
-            # -------------------------------------------------
-
-            if race_start < monitor_from:
-                continue
-
             meeting_date = (
                 race_start.strftime(
                     "%Y-%m-%d"
@@ -389,63 +350,102 @@ def get_todays_sportsbet_greyhound_races() -> list[dict]:
                 )
             )
 
-            races.append(
-                {
-                    "bookmaker":
-                        "SPORTSBET",
+            race_data = {
+                "bookmaker":
+                    "SPORTSBET",
 
-                    "event_id":
-                        int(
-                            event_id
-                        ),
+                "event_id":
+                    int(
+                        event_id
+                    ),
 
-                    "meeting_id":
-                        str(
-                            meeting_id
-                        ),
+                "meeting_id":
+                    str(
+                        meeting_id
+                    ),
 
-                    "competition_id":
-                        competition_id,
+                "competition_id":
+                    competition_id,
 
-                    "meeting_date":
-                        meeting_date,
+                "meeting_date":
+                    meeting_date,
 
-                    "meeting_name":
-                        meeting_name,
+                "meeting_name":
+                    meeting_name,
 
-                    "venue_code":
-                        venue_code,
+                "venue_code":
+                    venue_code,
 
-                    "race_number":
-                        int(
-                            race_number
-                        ),
+                "race_number":
+                    int(
+                        race_number
+                    ),
 
-                    "race_start":
-                        race_start.strftime(
+                "race_start":
+                    race_start.strftime(
+                        "%Y-%m-%d %H:%M"
+                    ),
+
+                "race_url":
+                    race_url,
+
+                "region_id":
+                    competition.get(
+                        "regionId"
+                    ),
+
+                "region_type":
+                    competition.get(
+                        "regionType"
+                    ),
+            }
+
+            # -------------------------------------------------
+            # FUTURE RACE OUTSIDE MONITOR WINDOW
+            # -------------------------------------------------
+
+            if race_start > monitor_until:
+                if next_future_race is None:
+                    next_future_race = (
+                        race_data
+                    )
+
+                else:
+                    current_next_start = (
+                        datetime.strptime(
+                            next_future_race[
+                                "race_start"
+                            ],
                             "%Y-%m-%d %H:%M"
-                        ),
+                        )
+                    )
 
-                    "race_url":
-                        race_url,
+                    if (
+                        race_start
+                        < current_next_start
+                    ):
+                        next_future_race = (
+                            race_data
+                        )
 
-                    "region_id":
-                        competition.get(
-                            "regionId"
-                        ),
+                continue
 
-                    "region_type":
-                        competition.get(
-                            "regionType"
-                        ),
-                }
+            # -------------------------------------------------
+            # MORE THAN 5 MINUTES PAST START
+            # -------------------------------------------------
+
+            if race_start < monitor_from:
+                continue
+
+            eligible_races.append(
+                race_data
             )
 
     # ========================================================
     # SORT
     # ========================================================
 
-    races.sort(
+    eligible_races.sort(
         key=lambda race: (
             race[
                 "race_start"
@@ -475,10 +475,59 @@ def get_todays_sportsbet_greyhound_races() -> list[dict]:
 
     print(
         f"Sportsbet eligible races: "
-        f"{len(races)}"
+        f"{len(eligible_races)}"
     )
 
-    return races
+    if next_future_race is not None:
+        print(
+            "Sportsbet next future race outside "
+            f"monitor window: "
+            f"{next_future_race['meeting_name']} "
+            f"R{next_future_race['race_number']} "
+            f"at {next_future_race['race_start']}"
+        )
+
+    return {
+        "eligible_races": eligible_races,
+        "next_future_race": next_future_race,
+    }
+
+
+# ============================================================
+# PUBLIC SCHEDULE
+# ============================================================
+
+def get_todays_sportsbet_greyhound_schedule() -> dict:
+    """
+    Return today's Sportsbet monitoring schedule including:
+
+    - Eligible races inside the monitoring window.
+    - The next future race outside the window.
+    """
+
+    return _discover_todays_sportsbet_schedule()
+
+
+# ============================================================
+# PUBLIC ELIGIBLE RACES
+# ============================================================
+
+def get_todays_sportsbet_greyhound_races() -> list[dict]:
+    """
+    Return today's Sportsbet greyhound races currently
+    eligible for bookmaker-price monitoring.
+
+    This preserves the original public function used by
+    main.py.
+    """
+
+    schedule = (
+        _discover_todays_sportsbet_schedule()
+    )
+
+    return schedule[
+        "eligible_races"
+    ]
 
 
 # ============================================================
@@ -487,9 +536,13 @@ def get_todays_sportsbet_greyhound_races() -> list[dict]:
 
 if __name__ == "__main__":
 
-    races = (
-        get_todays_sportsbet_greyhound_races()
+    schedule = (
+        get_todays_sportsbet_greyhound_schedule()
     )
+
+    races = schedule[
+        "eligible_races"
+    ]
 
     print()
 
@@ -505,3 +558,18 @@ if __name__ == "__main__":
             f"{race['race_url']}"
         )
 
+    next_future_race = schedule[
+        "next_future_race"
+    ]
+
+    if next_future_race is not None:
+        print()
+        print(
+            "Next future race outside monitor window:"
+        )
+        print(
+            f"{next_future_race['race_start']} | "
+            f"{next_future_race['meeting_name']} "
+            f"({next_future_race['venue_code']}) "
+            f"R{next_future_race['race_number']}"
+        )

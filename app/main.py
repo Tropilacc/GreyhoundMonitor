@@ -6,8 +6,8 @@ from dev_alerts import send_dev_alert
 from heartbeat import send_heartbeat
 from monitor_tab import monitor_race
 from monitor_sportsbet import monitor_sportsbet_race
-from race_finder_tab import get_todays_greyhound_races
-from race_finder_sportsbet import get_todays_sportsbet_greyhound_races
+from race_finder_tab import get_todays_greyhound_schedule
+from race_finder_sportsbet import get_todays_sportsbet_greyhound_schedule
 from reminders import check_race_reminders
 from results_monitor import check_unprocessed_results
 from stats_report import (
@@ -92,6 +92,43 @@ def run_stats_report() -> None:
 # ============================================================
 # RACE POLLING INTERVAL
 # ============================================================
+
+def get_race_discovery_interval(
+    minutes_to_next_race: float | None
+) -> int:
+    """
+    Return how often TAB and Sportsbet race schedules
+    should be rediscovered.
+
+    No known future race:
+        every 30 minutes
+
+    More than 3 hours away:
+        every 30 minutes
+
+    60-180 minutes:
+        every 10 minutes
+
+    30-60 minutes:
+        every 5 minutes
+
+    Under 30 minutes:
+        every 2 minutes
+    """
+
+    if minutes_to_next_race is None:
+        return 30 * 60
+
+    if minutes_to_next_race > 180:
+        return 30 * 60
+
+    if minutes_to_next_race > 60:
+        return 10 * 60
+
+    if minutes_to_next_race > 30:
+        return 5 * 60
+
+    return 2 * 60
 
 def get_poll_interval(
     minutes_to_start: float
@@ -265,6 +302,24 @@ def run_monitor() -> None:
     last_checked_sportsbet = {}
 
     # ========================================================
+    # RACE DISCOVERY CACHE
+    #
+    # Race schedules do not need to be downloaded every
+    # 30-second main-loop cycle. These values allow the
+    # latest discovered schedules to be reused until the
+    # next scheduled discovery refresh.
+    # ========================================================
+
+    races = []
+    sportsbet_races = []
+
+    tab_next_future_race = None
+    sportsbet_next_future_race = None
+
+    last_race_discovery = 0.0
+    race_discovery_interval = 0
+
+    # ========================================================
     # RESULT TIMER
     # ========================================================
 
@@ -289,83 +344,233 @@ def run_monitor() -> None:
 
     while True:
         try:
+            cycle_started_at = time.monotonic()
             now = datetime.now()
 
             # =================================================
             # DISCOVER RACES
+            #
+            # The main loop still runs every 30 seconds for
+            # results, reminders, statistics and StatusCake.
+            #
+            # TAB and Sportsbet schedules are only downloaded
+            # when the discovery timer says a refresh is due.
             # =================================================
 
-            try:
-                races = (
-                    get_todays_greyhound_races()
-                )
+            current_monotonic = time.monotonic()
 
-            except Exception as error:
-                print()
-                print(
-                    f"ERROR discovering today's "
-                    f"greyhound races: {error}"
-                )
-
-                send_dev_alert(
-                    source="MAIN / RACE FINDER",
-                    message=(
-                        "Failed to discover today's "
-                        "greyhound races."
-                    ),
-                    error=error,
-                    severity="ERROR",
-                )
-
-                print(
-                    f"Retrying in "
-                    f"{MAIN_LOOP_SECONDS} seconds..."
-                )
-
-                time.sleep(
-                    MAIN_LOOP_SECONDS
-                )
-
-                continue
-
-            print(
-                f"TAB eligible races: {len(races)}"
+            seconds_since_race_discovery = (
+                current_monotonic
+                - last_race_discovery
             )
 
-
-            # =================================================
-            # DISCOVER SPORTSBET RACES
-            # =================================================
-
-            try:
-                sportsbet_races = (
-                    get_todays_sportsbet_greyhound_races()
-                )
-
-            except Exception as error:
-                print()
-                print(
-                    f"ERROR discovering Sportsbet "
-                    f"greyhound races: {error}"
-                )
-
-                send_dev_alert(
-                    source="MAIN / SPORTSBET RACE FINDER",
-                    message=(
-                        "Failed to discover Sportsbet "
-                        "greyhound races."
-                    ),
-                    error=error,
-                    severity="ERROR",
-                )
-
-                sportsbet_races = []
-
-            print(
-                f"Sportsbet eligible races: "
-                f"{len(sportsbet_races)}"
+            should_discover_races = (
+                last_race_discovery == 0.0
+                or seconds_since_race_discovery
+                >= race_discovery_interval
             )
 
+            if should_discover_races:
+
+                tab_discovery_ok = True
+                sportsbet_discovery_ok = True
+
+                # =============================================
+                # TAB DISCOVERY
+                # =============================================
+
+                try:
+                    tab_schedule = (
+                        get_todays_greyhound_schedule()
+                    )
+
+                    races = tab_schedule[
+                        "eligible_races"
+                    ]
+
+                    tab_next_future_race = (
+                        tab_schedule[
+                            "next_future_race"
+                        ]
+                    )
+
+                except Exception as error:
+                    tab_discovery_ok = False
+
+                    print()
+                    print(
+                        f"ERROR discovering today's "
+                        f"TAB greyhound races: {error}"
+                    )
+
+                    send_dev_alert(
+                        source="MAIN / RACE FINDER",
+                        message=(
+                            "Failed to discover today's "
+                            "TAB greyhound races."
+                        ),
+                        error=error,
+                        severity="ERROR",
+                    )
+
+                print(
+                    f"TAB eligible races: "
+                    f"{len(races)}"
+                )
+
+                # =============================================
+                # SPORTSBET DISCOVERY
+                # =============================================
+
+                try:
+                    sportsbet_schedule = (
+                        get_todays_sportsbet_greyhound_schedule()
+                    )
+
+                    sportsbet_races = (
+                        sportsbet_schedule[
+                            "eligible_races"
+                        ]
+                    )
+
+                    sportsbet_next_future_race = (
+                        sportsbet_schedule[
+                            "next_future_race"
+                        ]
+                    )
+
+                except Exception as error:
+                    sportsbet_discovery_ok = False
+
+                    print()
+                    print(
+                        f"ERROR discovering Sportsbet "
+                        f"greyhound races: {error}"
+                    )
+
+                    send_dev_alert(
+                        source=(
+                            "MAIN / SPORTSBET RACE FINDER"
+                        ),
+                        message=(
+                            "Failed to discover Sportsbet "
+                            "greyhound races."
+                        ),
+                        error=error,
+                        severity="ERROR",
+                    )
+
+                print(
+                    f"Sportsbet eligible races: "
+                    f"{len(sportsbet_races)}"
+                )
+
+                # =============================================
+                # FIND NEAREST KNOWN FUTURE RACE
+                # =============================================
+
+                future_race_times = []
+
+                for race in (
+                    races
+                    + sportsbet_races
+                ):
+                    try:
+                        race_start = (
+                            parse_race_start(
+                                race
+                            )
+                        )
+
+                    except Exception:
+                        continue
+
+                    if race_start > now:
+                        future_race_times.append(
+                            race_start
+                        )
+
+                for future_race in (
+                    tab_next_future_race,
+                    sportsbet_next_future_race,
+                ):
+                    if future_race is None:
+                        continue
+
+                    try:
+                        race_start = (
+                            parse_race_start(
+                                future_race
+                            )
+                        )
+
+                    except Exception:
+                        continue
+
+                    if race_start > now:
+                        future_race_times.append(
+                            race_start
+                        )
+
+                if future_race_times:
+                    next_race_start = min(
+                        future_race_times
+                    )
+
+                    minutes_to_next_race = (
+                        next_race_start
+                        - now
+                    ).total_seconds() / 60
+
+                else:
+                    minutes_to_next_race = None
+
+                # =============================================
+                # NEXT DISCOVERY INTERVAL
+                # =============================================
+
+                if (
+                    not tab_discovery_ok
+                    or not sportsbet_discovery_ok
+                ):
+                    # Retry failed discovery quickly.
+                    race_discovery_interval = (
+                        MAIN_LOOP_SECONDS
+                    )
+
+                else:
+                    race_discovery_interval = (
+                        get_race_discovery_interval(
+                            minutes_to_next_race
+                        )
+                    )
+
+                last_race_discovery = (
+                    time.monotonic()
+                )
+
+                if minutes_to_next_race is None:
+                    print(
+                        "No future race currently known."
+                    )
+
+                else:
+                    print(
+                        f"Next known race in "
+                        f"{minutes_to_next_race:.0f} "
+                        f"minute(s)."
+                    )
+
+                print(
+                    "Next race discovery refresh in "
+                    f"{race_discovery_interval // 60} "
+                    "minute(s)."
+                    if race_discovery_interval >= 60
+                    else
+                    "Next race discovery refresh in "
+                    f"{race_discovery_interval} "
+                    "second(s)."
+                )
             races_checked_this_cycle = 0
 
             # =================================================
@@ -929,15 +1134,23 @@ def run_monitor() -> None:
                 f"race(s)."
             )
 
-            print(
-                f"Waiting "
-                f"{MAIN_LOOP_SECONDS} "
-                f"seconds..."
+            cycle_elapsed_seconds = time.monotonic() - cycle_started_at
+            cycle_wait_seconds = max(
+                0.0,
+                MAIN_LOOP_SECONDS - cycle_elapsed_seconds,
             )
 
-            time.sleep(
-                MAIN_LOOP_SECONDS
+            print(
+                f"Cycle took "
+                f"{cycle_elapsed_seconds:.1f} seconds. "
+                f"Waiting "
+                f"{cycle_wait_seconds:.1f} seconds..."
             )
+
+            if cycle_wait_seconds > 0:
+                time.sleep(
+                    cycle_wait_seconds
+                )
 
         except KeyboardInterrupt:
             print()
@@ -978,6 +1191,13 @@ def run_monitor() -> None:
 
 if __name__ == "__main__":
     run_monitor()
+
+
+
+
+
+
+
 
 
 

@@ -7,14 +7,22 @@ MONITOR_WINDOW_HOURS = 3
 POST_START_GRACE_MINUTES = 5
 
 
-def get_todays_greyhound_races() -> list[dict]:
+def _discover_todays_greyhound_schedule() -> dict:
     """
-    Find today's greyhound races that are eligible
-    for monitoring.
+    Discover today's TAB greyhound schedule.
+
+    Returns:
+        {
+            "eligible_races": [...],
+            "next_future_race": {...} | None
+        }
 
     Eligible races are:
     - No more than 3 hours before scheduled start.
     - No more than 5 minutes after scheduled start.
+
+    next_future_race is the earliest race that is
+    more than 3 hours away.
 
     TAB requires a headed Chromium browser, so the
     browser is launched far off-screen to prevent it
@@ -46,7 +54,8 @@ def get_todays_greyhound_races() -> list[dict]:
         "&jurisdiction=NSW"
     )
 
-    races = []
+    eligible_races = []
+    next_future_race = None
 
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(
@@ -179,23 +188,6 @@ def get_todays_greyhound_races() -> list[dict]:
                         .replace(tzinfo=None)
                     )
 
-                    # Ignore races more than
-                    # 3 hours away.
-                    if (
-                        race_start_local
-                        > monitor_until
-                    ):
-                        continue
-
-                    # Ignore races more than
-                    # 5 minutes past their
-                    # scheduled start.
-                    if (
-                        race_start_local
-                        < monitor_from
-                    ):
-                        continue
-
                     race_url = (
                         "https://www.tab.com.au/racing/"
                         f"{meeting_date}/"
@@ -204,27 +196,96 @@ def get_todays_greyhound_races() -> list[dict]:
                         f"{race_number}"
                     )
 
-                    races.append(
-                        {
-                            "race_url": race_url,
-                            "meeting_date": meeting_date,
-                            "meeting_name": meeting_name,
-                            "venue_code": venue_code,
-                            "race_number": race_number,
-                            "race_start": (
-                                race_start_local.strftime(
+                    race_data = {
+                        "race_url": race_url,
+                        "meeting_date": meeting_date,
+                        "meeting_name": meeting_name,
+                        "venue_code": venue_code,
+                        "race_number": race_number,
+                        "race_start": (
+                            race_start_local.strftime(
+                                "%Y-%m-%d %H:%M"
+                            )
+                        )
+                    }
+
+                    # -----------------------------------------
+                    # FUTURE RACE OUTSIDE MONITOR WINDOW
+                    # -----------------------------------------
+
+                    if race_start_local > monitor_until:
+                        if next_future_race is None:
+                            next_future_race = race_data
+
+                        else:
+                            current_next_start = (
+                                datetime.strptime(
+                                    next_future_race[
+                                        "race_start"
+                                    ],
                                     "%Y-%m-%d %H:%M"
                                 )
                             )
-                        }
+
+                            if (
+                                race_start_local
+                                < current_next_start
+                            ):
+                                next_future_race = (
+                                    race_data
+                                )
+
+                        continue
+
+                    # -----------------------------------------
+                    # TOO FAR PAST START
+                    # -----------------------------------------
+
+                    if race_start_local < monitor_from:
+                        continue
+
+                    eligible_races.append(
+                        race_data
                     )
 
         finally:
             context.close()
             browser.close()
 
-    races.sort(
+    eligible_races.sort(
         key=lambda race: race["race_start"]
     )
 
-    return races
+    return {
+        "eligible_races": eligible_races,
+        "next_future_race": next_future_race,
+    }
+
+
+def get_todays_greyhound_schedule() -> dict:
+    """
+    Return today's monitoring schedule including:
+
+    - Eligible races inside the monitoring window.
+    - The next future race outside the window.
+    """
+
+    return _discover_todays_greyhound_schedule()
+
+
+def get_todays_greyhound_races() -> list[dict]:
+    """
+    Return today's TAB greyhound races that are
+    currently eligible for price monitoring.
+
+    This preserves the original public function
+    used by main.py.
+    """
+
+    schedule = (
+        _discover_todays_greyhound_schedule()
+    )
+
+    return schedule[
+        "eligible_races"
+    ]
