@@ -3,7 +3,7 @@ from datetime import datetime, timedelta
 from playwright.sync_api import sync_playwright
 
 
-MONITOR_WINDOW_HOURS = 3
+MONITOR_WINDOW_HOURS = 5
 POST_START_GRACE_MINUTES = 5
 
 

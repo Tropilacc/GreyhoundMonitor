@@ -136,27 +136,15 @@ def get_poll_interval(
     """
     Return how often a race should be checked.
 
-    60-180 min:
-        every 10 minutes
-
-    30-60 min:
+    30-300 min:
         every 5 minutes
 
-    10-30 min:
-        every 2 minutes
-
-    -5 to 10 min:
+    Less than 30 min:
         every 1 minute
     """
 
-    if minutes_to_start > 60:
-        return 10 * 60
-
-    if minutes_to_start > 30:
+    if minutes_to_start >= 30:
         return 5 * 60
-
-    if minutes_to_start > 10:
-        return 2 * 60
 
     return 60
 
@@ -1191,6 +1179,7 @@ def run_monitor() -> None:
 
 if __name__ == "__main__":
     run_monitor()
+
 
 
 

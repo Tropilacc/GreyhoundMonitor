@@ -12,7 +12,7 @@ SPORTSBET_GREYHOUND_URL = (
     "https://www.sportsbet.com.au/greyhound-racing"
 )
 
-MONITOR_WINDOW_HOURS = 3
+MONITOR_WINDOW_HOURS = 5
 POST_START_GRACE_MINUTES = 5
 
 
