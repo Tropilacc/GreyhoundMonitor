@@ -29,6 +29,22 @@ HEARTBEAT_INTERVAL_SECONDS = 5 * 60
 
 STATS_REPORT_INTERVAL_SECONDS = 6 * 60 * 60
 
+ODDS_MONITOR_WINDOW_MINUTES = 5 * 60
+ODDS_POST_START_GRACE_MINUTES = 5
+
+ODDS_POLLING_RULES = (
+    {
+        "minimum_minutes_to_start": 30,
+        "interval_seconds": 5 * 60,
+    },
+    {
+        "minimum_minutes_to_start": (
+            -ODDS_POST_START_GRACE_MINUTES
+        ),
+        "interval_seconds": 60,
+    },
+)
+
 
 # ============================================================
 # STATISTICS REPORT
@@ -103,10 +119,10 @@ def get_race_discovery_interval(
     No known future race:
         every 30 minutes
 
-    More than 3 hours away:
+    More than 5 hours away:
         every 30 minutes
 
-    60-180 minutes:
+    60-300 minutes:
         every 10 minutes
 
     30-60 minutes:
@@ -119,7 +135,7 @@ def get_race_discovery_interval(
     if minutes_to_next_race is None:
         return 30 * 60
 
-    if minutes_to_next_race > 180:
+    if minutes_to_next_race > 300:
         return 30 * 60
 
     if minutes_to_next_race > 60:
@@ -136,17 +152,92 @@ def get_poll_interval(
     """
     Return how often a race should be checked.
 
-    30-300 min:
-        every 5 minutes
-
-    Less than 30 min:
-        every 1 minute
+    Polling behaviour is controlled by
+    ODDS_POLLING_RULES.
     """
 
-    if minutes_to_start >= 30:
-        return 5 * 60
+    for rule in ODDS_POLLING_RULES:
+        if (
+            minutes_to_start
+            >= rule["minimum_minutes_to_start"]
+        ):
+            return rule["interval_seconds"]
 
-    return 60
+    return ODDS_POLLING_RULES[-1][
+        "interval_seconds"
+    ]
+
+
+def format_poll_interval(
+    seconds: int
+) -> str:
+    """
+    Format a polling interval for display.
+    """
+
+    minutes = seconds // 60
+
+    unit = (
+        "minute"
+        if minutes == 1
+        else "minutes"
+    )
+
+    return f"Every {minutes} {unit}"
+
+
+def send_startup_alert() -> None:
+    """
+    Send startup configuration to Discord.
+
+    Polling values are generated from the same
+    configuration used by get_poll_interval().
+    """
+
+    long_rule = ODDS_POLLING_RULES[0]
+    short_rule = ODDS_POLLING_RULES[1]
+
+    monitor_hours = (
+        ODDS_MONITOR_WINDOW_MINUTES
+        // 60
+    )
+
+    threshold_minutes = (
+        long_rule[
+            "minimum_minutes_to_start"
+        ]
+    )
+
+    send_dev_alert(
+        source="MAIN / STARTUP",
+        message="Greyhound Price Monitor started.",
+        severity="INFO",
+        details={
+            (
+                f"{threshold_minutes} mins "
+                f"to {monitor_hours} hrs"
+            ):
+                format_poll_interval(
+                    long_rule[
+                        "interval_seconds"
+                    ]
+                ),
+            (
+                f"Less than "
+                f"{threshold_minutes} mins"
+            ):
+                format_poll_interval(
+                    short_rule[
+                        "interval_seconds"
+                    ]
+                ),
+            "Post-start grace":
+                (
+                    f"{ODDS_POST_START_GRACE_MINUTES} "
+                    f"minutes"
+                ),
+        },
+    )
 
 
 # ============================================================
@@ -193,7 +284,7 @@ def run_monitor() -> None:
     Run GreyhoundMonitor.
 
     PRICE MONITORING:
-        -3 hours through +5 minutes.
+        -5 hours through +5 minutes.
 
     PRE-RACE REMINDER:
         One Discord reminder per race when an
@@ -227,6 +318,13 @@ def run_monitor() -> None:
     print("Monitor started.")
     print("Press Ctrl + C to stop.")
     print()
+
+    # ========================================================
+    # STARTUP CONFIGURATION ALERT
+    # ========================================================
+
+    send_startup_alert()
+
 
     # ========================================================
     # INITIAL STATUSCAKE HEARTBEAT
@@ -649,10 +747,10 @@ def run_monitor() -> None:
                     race_start - now
                 ).total_seconds() / 60
 
-                if minutes_to_start < -5:
+                if minutes_to_start < -ODDS_POST_START_GRACE_MINUTES:
                     continue
 
-                if minutes_to_start > 180:
+                if minutes_to_start > ODDS_MONITOR_WINDOW_MINUTES:
                     continue
 
                 race_key = (
@@ -857,10 +955,10 @@ def run_monitor() -> None:
                     race_start - now
                 ).total_seconds() / 60
 
-                if minutes_to_start < -5:
+                if minutes_to_start < -ODDS_POST_START_GRACE_MINUTES:
                     continue
 
-                if minutes_to_start > 180:
+                if minutes_to_start > ODDS_MONITOR_WINDOW_MINUTES:
                     continue
 
                 race_key = get_race_key(
@@ -1179,6 +1277,8 @@ def run_monitor() -> None:
 
 if __name__ == "__main__":
     run_monitor()
+
+
 
 
 

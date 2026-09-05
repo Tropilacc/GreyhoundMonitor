@@ -44,6 +44,7 @@ DISCORD_DEV_WEBHOOK_URL = os.getenv(
 DEV_WEBHOOK_TIMEOUT_SECONDS = 15
 
 VALID_SEVERITIES = {
+    "INFO",
     "WARNING",
     "ERROR",
 }
@@ -65,6 +66,9 @@ def get_severity_heading(
         .strip()
         .upper()
     )
+
+    if severity == "INFO":
+        return "GREYHOUND TRACKER - STARTUP"
 
     if severity == "ERROR":
         return "🚨 GREYHOUND TRACKER — ERROR"
@@ -289,7 +293,7 @@ def main():
             "Greyhound Tracker DEV webhook "
             "test message."
         ),
-        severity="WARNING",
+        severity="INFO",
         details={
             "Status":
                 "Webhook test",
@@ -314,3 +318,9 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+
+
+
+
