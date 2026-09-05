@@ -16,6 +16,7 @@ from notifications import (
     get_role_id,
     send_discord_message,
 )
+from time_utils import format_race_start_time
 from result_scraper import (
     build_form_url,
     scrape_results_from_url,
@@ -137,9 +138,14 @@ def build_win_alert_message(
             f"({venue_code})"
         )
     else:
-        meeting_text = (
-            meeting_name
+        meeting_text = meeting_name
+
+    race_start_text = format_race_start_time(
+        pending_alert.get(
+            "race_start",
+            ""
         )
+    )
 
     return (
         f"{alert.emoji} "
@@ -148,7 +154,8 @@ def build_win_alert_message(
         f"**{pending_alert['runner_name']}**\n"
         f"{meeting_text} "
         f"R{pending_alert['race_number']} "
-        f"- Box {pending_alert['runner_number']}\n\n"
+        f"- Box {pending_alert['runner_number']}\n"
+        f"Race Start: **{race_start_text}**\n\n"
         f"Original Alert Price: "
         f"**{alert_price_text}**\n"
         f"Result: **1st - WIN**"

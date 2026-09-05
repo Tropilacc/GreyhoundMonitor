@@ -20,6 +20,7 @@ from notifications import (
     send_discord_message,
 )
 from scraper_tab import get_race_prices
+from time_utils import format_race_start_time
 
 
 # ============================================================
@@ -153,7 +154,6 @@ def build_alert_message(
             price_change_absolute
             / runner.initial_price
         ) * 100
-
     else:
         price_change_percent = 0
 
@@ -184,7 +184,9 @@ def build_alert_message(
         f"{runner.meeting_name} "
         f"({runner.venue_code}) "
         f"R{runner.race_number} "
-        f"— Box {runner.runner_number}\n\n"
+        f"- Box {runner.runner_number}\n"
+        f"Race Start: "
+        f"**{format_race_start_time(runner.race_start)}**\n\n"
         f"Initial Price: "
         f"**${runner.initial_price:.2f}**\n"
         f"Current Price: "
