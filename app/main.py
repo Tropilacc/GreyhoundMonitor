@@ -117,26 +117,38 @@ def get_race_discovery_interval(
     should be rediscovered.
 
     No known future race:
-        every 30 minutes
+        retry in 5 hours.
 
     More than 5 hours away:
-        every 30 minutes
+        wait until the next known race is exactly
+        5 hours from starting.
 
     60-300 minutes:
-        every 10 minutes
+        every 10 minutes.
 
     30-60 minutes:
-        every 5 minutes
+        every 5 minutes.
 
     Under 30 minutes:
-        every 2 minutes
+        every 2 minutes.
     """
 
-    if minutes_to_next_race is None:
-        return 30 * 60
+    five_hours_minutes = 5 * 60
+    five_hours_seconds = 5 * 60 * 60
 
-    if minutes_to_next_race > 300:
-        return 30 * 60
+    if minutes_to_next_race is None:
+        return five_hours_seconds
+
+    if minutes_to_next_race > five_hours_minutes:
+        seconds_until_monitor_window = (
+            minutes_to_next_race
+            - five_hours_minutes
+        ) * 60
+
+        return max(
+            MAIN_LOOP_SECONDS,
+            int(seconds_until_monitor_window),
+        )
 
     if minutes_to_next_race > 60:
         return 10 * 60
@@ -1277,16 +1289,3 @@ def run_monitor() -> None:
 
 if __name__ == "__main__":
     run_monitor()
-
-
-
-
-
-
-
-
-
-
-
-
-
