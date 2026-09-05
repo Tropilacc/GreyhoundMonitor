@@ -1,31 +1,16 @@
-import csv
 import re
 import time
-from pathlib import Path
 from urllib.parse import urlparse
 
 from playwright.sync_api import Page
 
+from bookmaker_venues import (
+    get_track_code,
+    get_normal_venue_code,
+)
+
 from dev_notifications import (
     send_missing_form_venue_alert,
-)
-
-
-# ============================================================
-# PROJECT PATHS
-# ============================================================
-
-PROJECT_ROOT = (
-    Path(__file__)
-    .resolve()
-    .parent
-    .parent
-)
-
-TAB_FORM_VENUES_CSV = (
-    PROJECT_ROOT
-    / "data"
-    / "tab_form_venues.csv"
 )
 
 
@@ -46,154 +31,6 @@ FORM_TAB_MAX_WAIT_SECONDS = 20
 FORM_TAB_MAX_ATTEMPTS = 2
 
 RESULT_POLL_INTERVAL_MS = 1000
-
-
-# ============================================================
-# TAB FORM VENUE MAPPINGS
-# ============================================================
-
-def load_tab_form_venue_codes() -> dict[str, dict]:
-    """
-    Load TAB Form venue mappings from CSV.
-
-    Required columns:
-
-        MEETINGNAME
-        NORMALVENUECODE
-        FORMVENUECODE
-    """
-
-    if not TAB_FORM_VENUES_CSV.exists():
-        raise RuntimeError(
-            "TAB Form venue mapping CSV "
-            f"does not exist: "
-            f"{TAB_FORM_VENUES_CSV}"
-        )
-
-    required_columns = {
-        "MEETINGNAME",
-        "NORMALVENUECODE",
-        "FORMVENUECODE",
-    }
-
-    mappings = {}
-
-    with open(
-        TAB_FORM_VENUES_CSV,
-        "r",
-        encoding="utf-8-sig",
-        newline=""
-    ) as csv_file:
-
-        reader = csv.DictReader(
-            csv_file
-        )
-
-        fieldnames = (
-            set(reader.fieldnames or [])
-        )
-
-        missing_columns = (
-            required_columns
-            - fieldnames
-        )
-
-        if missing_columns:
-            raise RuntimeError(
-                "TAB Form venue mapping CSV "
-                "is missing required column(s): "
-                + ", ".join(
-                    sorted(
-                        missing_columns
-                    )
-                )
-            )
-
-        for row_number, row in enumerate(
-            reader,
-            start=2
-        ):
-
-            meeting_name = (
-                row.get(
-                    "MEETINGNAME",
-                    ""
-                )
-                .strip()
-                .upper()
-                .replace(" ", "-")
-            )
-
-            normal_venue_code = (
-                row.get(
-                    "NORMALVENUECODE",
-                    ""
-                )
-                .strip()
-                .upper()
-            )
-
-            form_venue_code = (
-                row.get(
-                    "FORMVENUECODE",
-                    ""
-                )
-                .strip()
-                .upper()
-            )
-
-            if (
-                not meeting_name
-                and not normal_venue_code
-                and not form_venue_code
-            ):
-                continue
-
-            if not meeting_name:
-                print(
-                    f"WARNING: Ignoring TAB Form venue "
-                    f"CSV row {row_number}: "
-                    f"MEETINGNAME is blank."
-                )
-                continue
-
-            if not form_venue_code:
-                print(
-                    f"WARNING: Ignoring TAB Form venue "
-                    f"CSV row {row_number}: "
-                    f"FORMVENUECODE is blank "
-                    f"for {meeting_name}."
-                )
-                continue
-
-            if meeting_name in mappings:
-                raise RuntimeError(
-                    "Duplicate MEETINGNAME in "
-                    "TAB Form venue CSV: "
-                    f"{meeting_name}"
-                )
-
-            mappings[
-                meeting_name
-            ] = {
-                "normal_venue_code":
-                    normal_venue_code,
-                "form_venue_code":
-                    form_venue_code,
-            }
-
-    if not mappings:
-        raise RuntimeError(
-            "TAB Form venue mapping CSV "
-            "contains no usable mappings."
-        )
-
-    return mappings
-
-
-TAB_FORM_VENUE_CODES = (
-    load_tab_form_venue_codes()
-)
 
 
 # ============================================================
@@ -235,53 +72,24 @@ def extract_dollar_values(
 ) -> list[float]:
     """
     Extract dollar amounts from one Fixed Odds result cell.
-
-    Examples:
-
-        "$8.00\\n$2.20"
-            -> [8.0, 2.2]
-
-        "$1.80"
-            -> [1.8]
-
-        ""
-            -> []
-
-    Tote values are never passed into this function.
     """
 
-    matches = re.findall(
-        r"\$([0-9]+(?:\.[0-9]+)?)",
-        text or ""
+    values = re.findall(
+        r"\$(\d+(?:\.\d+)?)",
+        text
     )
 
-    values = []
-
-    for value in matches:
-        try:
-            values.append(
-                float(value)
-            )
-
-        except ValueError:
-            continue
-
-    return values
+    return [
+        float(value)
+        for value in values
+    ]
 
 
 def page_is_tab_form(
     page: Page
 ) -> bool:
     """
-    Return True only when the currently loaded page is
-    hosted on form.tab.com.au.
-
-    TAB Form uses a dedicated Scratchings section that can
-    be parsed safely.
-
-    The normal TAB site must NOT use the same parser because
-    its flattened body text can contain unrelated race,
-    navigation, meeting and market numbers.
+    Return True when the current page is a TAB Form page.
     """
 
     try:
@@ -299,97 +107,74 @@ def page_is_tab_form(
         return False
 
 
-# ============================================================
-# TAB FORM SCRATCHING PARSER
-# ============================================================
-
 def parse_scratched_runner_numbers(
     body_text: str
 ) -> list[int]:
     """
-    Parse runner numbers from TAB Form's dedicated
+    Parse scratched runner numbers from the TAB Form
     Scratchings section.
-
-    IMPORTANT:
-
-    This function is ONLY valid for TAB Form body text.
-
-    It must not be used against the normal TAB website.
-
-    There is deliberately NO hard-coded upper limit on
-    runner number.
-
-    This keeps the parser compatible with:
-
-        - greyhounds
-        - reserves
-        - thoroughbreds
-        - larger race fields
     """
 
-    if not body_text:
-        return []
-
     scratchings_match = re.search(
-        r"(?is)"
-        r"\bScratchings\b"
-        r"\s*"
-        r"(.*?)"
-        r"(?="
-        r"\bSubstitutes\b"
-        r"|"
-        r"\bFIXED ODDS\b"
-        r"|"
-        r"\bLast Updated\b"
-        r"|"
-        r"$"
-        r")",
+        r"(?im)^Scratchings\b",
         body_text
     )
 
     if scratchings_match is None:
         return []
 
-    scratchings_text = (
-        scratchings_match
-        .group(1)
-        .strip()
+    scratchings_text = body_text[
+        scratchings_match.start():
+    ]
+
+    next_section_match = re.search(
+        r"(?im)^"
+        r"(?:Results|Exotic Results|Dividends|"
+        r"Stewards|Race Comments)\b",
+        scratchings_text[
+            len("Scratchings"):
+        ]
     )
 
-    if not scratchings_text:
-        return []
+    if next_section_match is not None:
+        end_index = (
+            len("Scratchings")
+            + next_section_match.start()
+        )
 
-    if scratchings_text.upper() in {
-        "NIL",
-        "NONE",
-        "NO SCRATCHINGS",
-    }:
-        return []
+        scratchings_text = (
+            scratchings_text[
+                :end_index
+            ]
+        )
 
     runner_numbers = []
 
-    matches = re.findall(
-        r"(?<!\d)"
-        r"(\d{1,2})"
-        r"(?:\([A-Z]+\))?"
-        r"(?!\d)",
-        scratchings_text,
-        re.IGNORECASE
-    )
+    patterns = [
+        r"(?im)^\s*(\d+)\.\s+",
+        r"(?im)^\s*(\d+)\s+",
+    ]
 
-    for value in matches:
-        try:
+    for pattern in patterns:
+
+        for match in re.finditer(
+            pattern,
+            scratchings_text
+        ):
             runner_number = int(
-                value
+                match.group(1)
             )
 
-        except ValueError:
-            continue
-
-        if runner_number not in runner_numbers:
-            runner_numbers.append(
+            if (
                 runner_number
-            )
+                not in runner_numbers
+            ):
+                runner_numbers.append(
+                    runner_number
+                )
+
+        if runner_numbers:
+            break
 
     return runner_numbers
 
@@ -399,48 +184,72 @@ def get_runner_name_for_number(
     runner_number: int
 ) -> str:
     """
-    Attempt to retrieve a scratched runner's name.
-
-    Matching ultimately occurs by runner number, so the
-    placeholder is acceptable on historical TAB Form pages
-    where the scratched runner name is unavailable.
+    Try to find the runner name associated with a runner
+    number on the current page.
     """
 
-    selectors = [
-        (
-            f'[data-testid="runner-number-{runner_number}"] '
-            f'.runner-name'
-        ),
-        (
-            f'#runner-number-{runner_number} '
-            f'.runner-name'
-        ),
+    possible_selectors = [
+        "tbody tr",
+        "div",
+        "li",
     ]
 
-    for selector in selectors:
+    number_pattern = re.compile(
+        rf"^\s*{runner_number}\.\s*(.+?)\s*$"
+    )
+
+    for selector in possible_selectors:
+
+        elements = page.locator(
+            selector
+        )
 
         try:
-            locator = page.locator(
-                selector
+            count = elements.count()
+
+        except Exception:
+            continue
+
+        for index in range(
+            min(count, 500)
+        ):
+
+            try:
+                text = (
+                    elements.nth(index)
+                    .inner_text(
+                        timeout=500
+                    )
+                    .strip()
+                )
+
+            except Exception:
+                continue
+
+            if not text:
+                continue
+
+            first_line = (
+                text.splitlines()[0]
+                .strip()
             )
 
-            if locator.count() == 0:
+            match = number_pattern.match(
+                first_line
+            )
+
+            if match is None:
                 continue
 
             runner_name = (
-                locator
-                .first
-                .inner_text()
+                match.group(1)
                 .strip()
             )
 
             if runner_name:
                 return runner_name
 
-        except Exception:
-            continue
-
-    return "SCRATCHED RUNNER"
+    return ""
 
 
 def add_scratched_runners(
@@ -449,32 +258,13 @@ def add_scratched_runners(
     body_text: str
 ) -> list[dict]:
     """
-    Add scratched runners to an already-published TAB Form
-    result.
+    Add TAB Form scratched runners to parsed results.
 
-    Scratchings are deliberately ignored on normal TAB
-    pages by this function.
+    Scratchings are represented with:
 
-    Scratchings by themselves never make a race count as
-    resulted.
+        finish_position = 100
+        scratched = True
     """
-
-    if not results:
-        return results
-
-    # ========================================================
-    # CRITICAL SAFETY CHECK
-    #
-    # The body-text Scratchings parser is designed only for
-    # TAB Form.
-    #
-    # Never run it against www.tab.com.au.
-    # ========================================================
-
-    if not page_is_tab_form(
-        page
-    ):
-        return results
 
     scratched_runner_numbers = (
         parse_scratched_runner_numbers(
@@ -486,9 +276,7 @@ def add_scratched_runners(
         return results
 
     existing_runner_numbers = {
-        result.get(
-            "runner_number"
-        )
+        result["runner_number"]
         for result in results
     }
 
@@ -540,7 +328,7 @@ def build_form_url(
 ) -> str | None:
     """
     Convert a normal TAB race URL into the corresponding
-    TAB Form URL using data/tab_form_venues.csv.
+    TAB Form URL using data/bookmaker_venues.csv.
     """
 
     parsed_url = urlparse(
@@ -589,13 +377,22 @@ def build_form_url(
         .strip()
     )
 
-    venue_mapping = (
-        TAB_FORM_VENUE_CODES.get(
-            meeting_slug
+    track_name = (
+        meeting_slug
+        .replace(
+            "-",
+            " "
         )
     )
 
-    if venue_mapping is None:
+    form_venue_code = (
+        get_track_code(
+            bookmaker="TABFORM",
+            track_name=track_name
+        )
+    )
+
+    if form_venue_code is None:
         print(
             f"WARNING: No TAB Form venue code "
             f"configured for {meeting_slug} "
@@ -618,15 +415,10 @@ def build_form_url(
         return None
 
     configured_normal_code = (
-        venue_mapping[
-            "normal_venue_code"
-        ]
-    )
-
-    form_venue_code = (
-        venue_mapping[
-            "form_venue_code"
-        ]
+        get_normal_venue_code(
+            bookmaker="TABFORM",
+            bookmaker_meeting_name=track_name
+        )
     )
 
     if (
@@ -635,7 +427,7 @@ def build_form_url(
         != normal_venue_code
     ):
         print(
-            f"WARNING: TAB Form CSV normal venue code "
+            f"WARNING: TAB track code "
             f"for {meeting_slug} is "
             f"{configured_normal_code}, "
             f"but race URL uses "
@@ -797,10 +589,6 @@ def parse_results_from_dom(
         if cell_count < 4:
             continue
 
-        # ----------------------------------------------------
-        # FINISHING POSITION
-        # ----------------------------------------------------
-
         position_text = (
             cells.nth(0)
             .inner_text()
@@ -815,10 +603,6 @@ def parse_results_from_dom(
 
         if finish_position is None:
             continue
-
-        # ----------------------------------------------------
-        # RUNNER
-        # ----------------------------------------------------
 
         runner_details_text = (
             cells.nth(2)
@@ -850,14 +634,6 @@ def parse_results_from_dom(
             runner_match.group(2)
             .strip()
         )
-
-        # ----------------------------------------------------
-        # FIXED ODDS SETTLEMENT COLUMN
-        #
-        # ONLY Fixed Odds is inspected.
-        #
-        # Tote is deliberately ignored.
-        # ----------------------------------------------------
 
         fixed_odds_text = (
             cells.nth(3)
@@ -894,12 +670,6 @@ def parse_results_from_dom(
 
     if not results:
         return []
-
-    # ========================================================
-    # SCRATCHINGS
-    #
-    # Only TAB Form has the dedicated Scratchings parser.
-    # ========================================================
 
     if page_is_tab_form(
         page
@@ -964,10 +734,6 @@ def poll_page_for_results(
         poll_attempt += 1
 
         try:
-            # =================================================
-            # STRUCTURED DOM PARSER
-            # =================================================
-
             results = parse_results_from_dom(
                 page
             )
@@ -1053,10 +819,6 @@ def poll_page_for_results(
                     last_body_text
                 )
 
-            # =================================================
-            # BODY TEXT FOR DIAGNOSTICS / FALLBACK
-            # =================================================
-
             body_text = page.locator(
                 "body"
             ).inner_text(
@@ -1074,11 +836,6 @@ def poll_page_for_results(
                     time.monotonic()
                     - start_time
                 )
-
-                # ------------------------------------------------
-                # Only TAB Form may augment fallback results with
-                # dedicated Scratchings-section data.
-                # ------------------------------------------------
 
                 if page_is_tab_form(
                     page
@@ -1265,10 +1022,6 @@ def scrape_results_from_url(
         == "form.tab.com.au"
     )
 
-    # ========================================================
-    # NORMAL TAB PAGE
-    # ========================================================
-
     if not is_form_page:
 
         page.goto(
@@ -1301,10 +1054,6 @@ def scrape_results_from_url(
         )
 
         return []
-
-    # ========================================================
-    # TAB FORM PAGE
-    # ========================================================
 
     for form_attempt in range(
         1,

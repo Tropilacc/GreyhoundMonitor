@@ -2,15 +2,24 @@ import csv
 from pathlib import Path
 
 
+PROJECT_ROOT = (
+    Path(__file__)
+    .resolve()
+    .parent
+    .parent
+)
+
 BOOKMAKER_VENUES_PATH = (
-    Path("data")
+    PROJECT_ROOT
+    / "data"
     / "bookmaker_venues.csv"
 )
 
 
 def normalise_text(value: str) -> str:
     """
-    Normalise bookmaker and meeting names for matching.
+    Normalise bookmaker names, track names and track codes
+    for matching.
     """
 
     return (
@@ -22,15 +31,24 @@ def normalise_text(value: str) -> str:
 
 def load_bookmaker_venues() -> list[dict]:
     """
-    Load bookmaker venue mappings from:
+    Load bookmaker/source track mappings from:
 
         data/bookmaker_venues.csv
 
     Expected columns:
 
         BOOKMAKER
-        BOOKMAKER_MEETING_NAME
-        NORMALVENUECODE
+        TRACKNAME
+        TRACKCODE
+        COMMENTS
+
+    TRACKCODE is specific to the BOOKMAKER/source.
+
+    Examples:
+
+        TAB,RICHMOND,RIC
+        TABFORM,RICHMOND,S
+        SPORTSBET,Richmond,RIC
     """
 
     if not BOOKMAKER_VENUES_PATH.exists():
@@ -53,8 +71,9 @@ def load_bookmaker_venues() -> list[dict]:
 
         required_columns = {
             "BOOKMAKER",
-            "BOOKMAKER_MEETING_NAME",
-            "NORMALVENUECODE",
+            "TRACKNAME",
+            "TRACKCODE",
+            "COMMENTS",
         }
 
         actual_columns = set(
@@ -73,6 +92,8 @@ def load_bookmaker_venues() -> list[dict]:
                 f"{', '.join(sorted(missing_columns))}"
             )
 
+        seen_keys = set()
+
         for row in reader:
 
             bookmaker = normalise_text(
@@ -82,81 +103,89 @@ def load_bookmaker_venues() -> list[dict]:
                 )
             )
 
-            bookmaker_meeting_name = (
-                normalise_text(
-                    row.get(
-                        "BOOKMAKER_MEETING_NAME",
-                        ""
-                    )
+            track_name = normalise_text(
+                row.get(
+                    "TRACKNAME",
+                    ""
                 )
             )
 
-            normal_venue_code = (
-                normalise_text(
+            track_code = normalise_text(
+                row.get(
+                    "TRACKCODE",
+                    ""
+                )
+            )
+
+            comments = (
+                str(
                     row.get(
-                        "NORMALVENUECODE",
+                        "COMMENTS",
                         ""
                     )
+                    or ""
                 )
+                .strip()
             )
 
             if not bookmaker:
                 continue
 
-            if not bookmaker_meeting_name:
+            if not track_name:
                 continue
 
-            if not normal_venue_code:
-                continue
+            key = (
+                bookmaker,
+                track_name,
+            )
+
+            if key in seen_keys:
+                raise ValueError(
+                    "Duplicate bookmaker track mapping "
+                    f"found for "
+                    f"{bookmaker} / {track_name}"
+                )
+
+            seen_keys.add(
+                key
+            )
 
             mappings.append(
                 {
                     "bookmaker":
                         bookmaker,
 
-                    "bookmaker_meeting_name":
-                        bookmaker_meeting_name,
+                    "track_name":
+                        track_name,
 
-                    "normal_venue_code":
-                        normal_venue_code,
+                    "track_code":
+                        track_code,
+
+                    "comments":
+                        comments,
                 }
             )
 
     return mappings
 
 
-def get_normal_venue_code(
+def get_track_mapping(
     bookmaker: str,
-    bookmaker_meeting_name: str
-) -> str | None:
+    track_name: str
+) -> dict | None:
     """
-    Convert a bookmaker-specific meeting name into the
-    canonical venue code used by GreyhoundMonitor.
+    Return the mapping row for a bookmaker/source and
+    track name.
 
-    Example:
-
-        bookmaker:
-            SPORTSBET
-
-        bookmaker_meeting_name:
-            Wentworth Park
-
-        returns:
-            WWP
-
-    Returns None if no mapping exists.
+    Returns None if the track is not configured.
     """
 
-    bookmaker_normalised = (
-        normalise_text(
-            bookmaker
-        )
+    bookmaker_normalised = normalise_text(
+        bookmaker
     )
 
-    meeting_normalised = (
-        normalise_text(
-            bookmaker_meeting_name
-        )
+    track_name_normalised = normalise_text(
+        track_name
     )
 
     mappings = load_bookmaker_venues()
@@ -170,18 +199,111 @@ def get_normal_venue_code(
             continue
 
         if (
-            mapping[
-                "bookmaker_meeting_name"
-            ]
-            != meeting_normalised
+            mapping["track_name"]
+            != track_name_normalised
         ):
             continue
 
-        return mapping[
-            "normal_venue_code"
-        ]
+        return mapping
 
     return None
+
+
+def get_track_code(
+    bookmaker: str,
+    track_name: str
+) -> str | None:
+    """
+    Return the source-specific TRACKCODE for a track.
+
+    Example:
+
+        get_track_code(
+            "TABFORM",
+            "Richmond"
+        )
+
+    returns:
+
+        S
+    """
+
+    mapping = get_track_mapping(
+        bookmaker=bookmaker,
+        track_name=track_name
+    )
+
+    if mapping is None:
+        return None
+
+    track_code = mapping[
+        "track_code"
+    ]
+
+    if not track_code:
+        return None
+
+    return track_code
+
+
+def require_track_code(
+    bookmaker: str,
+    track_name: str
+) -> str:
+    """
+    Return the source-specific TRACKCODE.
+
+    Raises an error if the mapping does not exist or the
+    TRACKCODE is blank.
+    """
+
+    track_code = get_track_code(
+        bookmaker=bookmaker,
+        track_name=track_name
+    )
+
+    if track_code is None:
+        raise ValueError(
+            "No track code configured for "
+            f"{bookmaker} / {track_name}"
+        )
+
+    return track_code
+
+
+def get_normal_venue_code(
+    bookmaker: str,
+    bookmaker_meeting_name: str
+) -> str | None:
+    """
+    Return the canonical TAB track code used in RUNNERID.
+
+    The supplied bookmaker/source is first used to identify
+    the common TRACKNAME. The matching TAB row is then used
+    to obtain the canonical TAB TRACKCODE.
+
+    This function is retained for compatibility with the
+    existing Sportsbet integration.
+    """
+
+    source_mapping = get_track_mapping(
+        bookmaker=bookmaker,
+        track_name=bookmaker_meeting_name
+    )
+
+    if source_mapping is None:
+        return None
+
+    common_track_name = source_mapping[
+        "track_name"
+    ]
+
+    tab_track_code = get_track_code(
+        bookmaker="TAB",
+        track_name=common_track_name
+    )
+
+    return tab_track_code
 
 
 def require_normal_venue_code(
@@ -189,13 +311,10 @@ def require_normal_venue_code(
     bookmaker_meeting_name: str
 ) -> str:
     """
-    Return the canonical venue code.
+    Return the canonical TAB track code used in RUNNERID.
 
-    Raises an error when no mapping exists.
-
-    This is useful during bookmaker integration because
-    silently inventing or guessing a venue code could cause
-    bookmaker prices to be attached to the wrong RUNNERID.
+    Raises an error when the bookmaker track cannot be
+    resolved to a configured TAB TRACKCODE.
     """
 
     venue_code = get_normal_venue_code(
@@ -207,7 +326,7 @@ def require_normal_venue_code(
 
     if venue_code is None:
         raise ValueError(
-            "No bookmaker venue mapping found for "
+            "No canonical TAB track mapping found for "
             f"{bookmaker} / "
             f"{bookmaker_meeting_name}"
         )
@@ -217,16 +336,36 @@ def require_normal_venue_code(
 
 if __name__ == "__main__":
 
-    test_bookmaker = "SPORTSBET"
-    test_meeting = "Wentworth Park"
+    tests = [
+        (
+            "SPORTSBET",
+            "Wentworth Park",
+        ),
+        (
+            "TAB",
+            "Richmond",
+        ),
+        (
+            "TABFORM",
+            "Richmond",
+        ),
+    ]
 
-    result = require_normal_venue_code(
-        bookmaker=test_bookmaker,
-        bookmaker_meeting_name=test_meeting
-    )
+    for bookmaker, track_name in tests:
 
-    print(
-        f"{test_bookmaker} / "
-        f"{test_meeting} -> "
-        f"{result}"
-    )
+        source_code = get_track_code(
+            bookmaker=bookmaker,
+            track_name=track_name
+        )
+
+        normal_code = get_normal_venue_code(
+            bookmaker=bookmaker,
+            bookmaker_meeting_name=track_name
+        )
+
+        print(
+            f"{bookmaker} / "
+            f"{track_name} -> "
+            f"source={source_code}, "
+            f"TAB={normal_code}"
+        )
