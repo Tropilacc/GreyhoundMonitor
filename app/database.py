@@ -118,6 +118,13 @@ def create_tables(
     ALERT_HISTORY:
         Stores each price alert that fired.
 
+        WINALERTSENT tracks the secondary Discord
+        notification for a winning alerted runner.
+
+        This is stored per RUNNERID + ALERTID so a runner
+        that triggered multiple alert categories receives
+        one independent win notification for each category.
+
     REMINDER_HISTORY:
         Stores one pre-race reminder per race.
 
@@ -183,22 +190,6 @@ def create_tables(
 
     # ========================================================
     # RUNNER PRICES
-    #
-    # Generic bookmaker-specific pricing table.
-    #
-    # One row per:
-    #
-    #     RUNNERID + BOOKMAKER
-    #
-    # Examples:
-    #
-    #     2026-08-15|WP|5|4 + TAB
-    #     2026-08-15|WP|5|4 + SPORTSBET
-    #     2026-08-15|WP|5|4 + LADBROKES
-    #
-    # The existing RUNNERS price columns remain untouched
-    # until the new multi-bookmaker architecture is fully
-    # integrated.
     # ========================================================
 
     cursor.execute(
@@ -241,6 +232,7 @@ def create_tables(
             ALERTPRICE REAL,
             FINISHPOSITION INTEGER,
             RESULTCHECKED INTEGER NOT NULL DEFAULT 0,
+            WINALERTSENT INTEGER NOT NULL DEFAULT 0,
             SENTAT TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
 
             PRIMARY KEY (
@@ -290,12 +282,48 @@ def create_tables(
             """
         )
 
+    # --------------------------------------------------------
+    # WIN ALERT MIGRATION
+    #
+    # Existing historical wins must NOT generate retroactive
+    # Discord notifications when this feature is first added.
+    #
+    # Therefore:
+    #
+    #     1. Add WINALERTSENT with default 0.
+    #     2. Mark existing completed wins as already sent.
+    #
+    # This UPDATE runs only during the one-time migration.
+    # New alert rows created afterwards remain at 0.
+    # --------------------------------------------------------
+
+    if not column_exists(
+        connection,
+        "ALERT_HISTORY",
+        "WINALERTSENT"
+    ):
+        cursor.execute(
+            """
+            ALTER TABLE ALERT_HISTORY
+            ADD COLUMN WINALERTSENT
+            INTEGER NOT NULL DEFAULT 0;
+            """
+        )
+
+        cursor.execute(
+            """
+            UPDATE ALERT_HISTORY
+            SET WINALERTSENT = 1
+            WHERE
+                RESULTCHECKED = 1
+                AND FINISHPOSITION = 1;
+            """
+        )
+
     connection.commit()
 
     # ========================================================
     # REMINDER HISTORY
-    #
-    # One record per race, not per runner.
     # ========================================================
 
     cursor.execute(
@@ -311,13 +339,6 @@ def create_tables(
 
     # ========================================================
     # SCRATCH HISTORY
-    #
-    # One record per runner.
-    #
-    # A row is inserted only AFTER the scratched-runner
-    # Discord notification has been accepted successfully.
-    #
-    # This allows automatic retry if Discord fails.
     # ========================================================
 
     cursor.execute(
@@ -486,22 +507,6 @@ def save_runner_price(
 ) -> None:
     """
     Insert or update one bookmaker-specific runner price.
-
-    BOOKMAKER is normalised to uppercase.
-
-    INITIAL_OBSERVED_PRICE is written only when the row is
-    first created and is never replaced on later checks.
-
-    OPENING_PRICE may initially be NULL. If the bookmaker
-    later provides an opening price, the existing NULL value
-    can be populated.
-
-    CURRENT_PRICE and PLACE_PRICE always represent the latest
-    observation.
-
-    SCRATCHED and MARKET_MOVER represent the latest state.
-
-    LAST_SEEN is refreshed every time the row is updated.
     """
 
     bookmaker_name = (
@@ -599,9 +604,6 @@ def get_runner_price(
 ) -> dict | None:
     """
     Return one bookmaker-specific pricing row.
-
-    Returns None if the runner/bookmaker combination
-    does not exist.
     """
 
     bookmaker_name = (
@@ -681,19 +683,6 @@ def get_runner_prices(
 ) -> list[dict]:
     """
     Return all bookmaker pricing rows for one runner.
-
-    Example result:
-
-        [
-            {
-                "bookmaker": "TAB",
-                ...
-            },
-            {
-                "bookmaker": "SPORTSBET",
-                ...
-            }
-        ]
     """
 
     cursor = connection.cursor()
@@ -833,17 +822,6 @@ def get_alert_ids_for_runner(
 ) -> list[str]:
     """
     Return every alert ID that has fired for a runner.
-
-    Example:
-
-        [
-            "extreme_price_move_up",
-            "price_shortening"
-        ]
-
-    The list is used when a previously alerted runner
-    becomes scratched so all relevant Discord roles can
-    be notified in one message.
     """
 
     cursor = connection.cursor()
@@ -888,11 +866,6 @@ def runner_has_any_alert(
     """
     Return True if this runner has triggered at least
     one price alert.
-
-    This is used by live scratching detection.
-
-    Non-alerted scratched runners do not need a scratch
-    Discord notification.
     """
 
     cursor = connection.cursor()
@@ -924,9 +897,6 @@ def get_alerted_runners_for_race(
     """
     Return every runner in this race that has triggered
     at least one alert.
-
-    Also returns the alert IDs and alert prices that
-    were recorded for the runner.
     """
 
     cursor = connection.cursor()
@@ -1022,6 +992,134 @@ def get_alerted_runners_for_race(
 
 
 # ============================================================
+# WIN ALERT HISTORY
+# ============================================================
+
+def get_pending_win_alerts(
+    connection: sqlite3.Connection
+) -> list[dict]:
+    """
+    Return every winning alert row whose secondary
+    Discord win notification has not yet been sent.
+
+    One result is returned per RUNNERID + ALERTID.
+
+    Therefore, if one runner triggered two separate alert
+    categories before winning, two independent win
+    notifications are returned.
+    """
+
+    cursor = connection.cursor()
+
+    cursor.execute(
+        """
+        SELECT
+            A.RUNNERID,
+            A.ALERTID,
+            A.ALERTPRICE,
+            R.MEETINGDATE,
+            R.MEETINGNAME,
+            R.VENUECODE,
+            R.RACENUMBER,
+            R.RACESTART,
+            R.RUNNERNUMBER,
+            R.RUNNERNAME,
+            R.INITIALPRICE,
+            R.CURRENTPRICE
+        FROM ALERT_HISTORY A
+
+        INNER JOIN RUNNERS R
+            ON R.RUNNERID = A.RUNNERID
+
+        WHERE
+            A.RESULTCHECKED = 1
+            AND A.FINISHPOSITION = 1
+            AND A.WINALERTSENT = 0
+
+        ORDER BY
+            A.SENTAT,
+            A.RUNNERID,
+            A.ALERTID;
+        """
+    )
+
+    rows = cursor.fetchall()
+
+    return [
+        {
+            "runner_id":
+                row[0],
+
+            "alert_id":
+                row[1],
+
+            "alert_price":
+                row[2],
+
+            "meeting_date":
+                row[3],
+
+            "meeting_name":
+                row[4] or "",
+
+            "venue_code":
+                row[5],
+
+            "race_number":
+                row[6],
+
+            "race_start":
+                row[7] or "",
+
+            "runner_number":
+                row[8],
+
+            "runner_name":
+                row[9],
+
+            "initial_price":
+                row[10],
+
+            "current_price":
+                row[11],
+        }
+        for row in rows
+    ]
+
+
+def mark_win_alert_as_sent(
+    connection: sqlite3.Connection,
+    runner_id: str,
+    alert_id: str
+) -> None:
+    """
+    Mark one specific secondary winning-alert
+    notification as successfully sent.
+
+    This must only be called after Discord accepts the
+    corresponding notification.
+    """
+
+    cursor = connection.cursor()
+
+    cursor.execute(
+        """
+        UPDATE ALERT_HISTORY
+        SET WINALERTSENT = 1
+        WHERE
+            RUNNERID = ?
+            AND ALERTID = ?;
+        """,
+        (
+            runner_id,
+            alert_id
+        )
+    )
+
+    connection.commit()
+
+
+# ============================================================
 # SCRATCH HISTORY
 # ============================================================
 
@@ -1061,9 +1159,6 @@ def mark_scratch_alert_as_sent(
     """
     Record that the scratched-runner Discord notification
     was successfully sent.
-
-    This should only be called after Discord accepts the
-    scratch notification.
     """
 
     cursor = connection.cursor()
@@ -1089,16 +1184,6 @@ def mark_runner_as_scratched(
 ) -> None:
     """
     Resolve all alerts for this runner as scratched.
-
-    Result code:
-
-        FINISHPOSITION = 100
-        RESULTCHECKED = 1
-
-    This is safe to call more than once.
-
-    The update applies only to ALERT_HISTORY rows belonging
-    to this runner.
     """
 
     cursor = connection.cursor()

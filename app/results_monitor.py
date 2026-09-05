@@ -1,12 +1,20 @@
 from collections import defaultdict
 from datetime import datetime, timedelta
 
+from alerts import get_alert_by_id
 from browser_session import BrowserSession
 from database import (
     connect_database,
     create_tables,
+    get_pending_win_alerts,
     get_unchecked_alert_runners,
+    mark_win_alert_as_sent,
     save_finish_position,
+)
+from dev_alerts import send_dev_alert
+from notifications import (
+    get_role_id,
+    send_discord_message,
 )
 from result_scraper import (
     build_form_url,
@@ -78,6 +86,285 @@ RESULT_CHECK_DELAY_MINUTES = 20
 DID_NOT_PLACE_POSITION = 99
 
 SCRATCHED_POSITION = 100
+
+
+# ============================================================
+# WIN ALERTS
+# ============================================================
+
+def build_win_alert_message(
+    pending_alert: dict,
+    alert
+) -> str:
+    """
+    Build the secondary Discord notification sent when
+    an alerted runner is subsequently confirmed as a win.
+
+    One message is generated per original alert category.
+    """
+
+    alert_price = pending_alert.get(
+        "alert_price"
+    )
+
+    if alert_price is None:
+        alert_price_text = "Unknown"
+    else:
+        alert_price_text = (
+            f"${alert_price:.2f}"
+        )
+
+    meeting_name = (
+        pending_alert.get(
+            "meeting_name"
+        )
+        or pending_alert.get(
+            "venue_code"
+        )
+        or "Unknown Meeting"
+    )
+
+    venue_code = (
+        pending_alert.get(
+            "venue_code"
+        )
+        or ""
+    )
+
+    if venue_code:
+        meeting_text = (
+            f"{meeting_name} "
+            f"({venue_code})"
+        )
+    else:
+        meeting_text = (
+            meeting_name
+        )
+
+    return (
+        f"{alert.emoji} "
+        f"**GREYHOUND {alert.name.upper()} WIN** "
+        f"{alert.emoji}\n\n"
+        f"**{pending_alert['runner_name']}**\n"
+        f"{meeting_text} "
+        f"R{pending_alert['race_number']} "
+        f"- Box {pending_alert['runner_number']}\n\n"
+        f"Original Alert Price: "
+        f"**{alert_price_text}**\n"
+        f"Result: **1st - WIN**"
+    )
+
+
+def send_pending_win_alerts() -> tuple[int, int]:
+    """
+    Send all outstanding secondary winning-runner alerts.
+
+    One Discord message is sent per original ALERT_HISTORY
+    row.
+
+    Only the role belonging to that original alert category
+    is mentioned.
+
+    DISCORD_ALL_ALERTS_ROLE_ID is intentionally NOT used for
+    secondary win notifications.
+
+    WINALERTSENT is changed to 1 only after Discord accepts
+    the corresponding message.
+
+    Returns:
+
+        successful_count,
+        failed_count
+    """
+
+    database = connect_database()
+
+    try:
+        create_tables(
+            database
+        )
+
+        pending_alerts = (
+            get_pending_win_alerts(
+                database
+            )
+        )
+
+        if not pending_alerts:
+            return 0, 0
+
+        print()
+        print(
+            "PENDING WIN ALERTS"
+        )
+        print(
+            "------------------"
+        )
+        print(
+            f"Pending notifications: "
+            f"{len(pending_alerts)}"
+        )
+
+        successful_count = 0
+        failed_count = 0
+
+        for pending_alert in pending_alerts:
+
+            runner_id = (
+                pending_alert[
+                    "runner_id"
+                ]
+            )
+
+            alert_id = (
+                pending_alert[
+                    "alert_id"
+                ]
+            )
+
+            runner_name = (
+                pending_alert[
+                    "runner_name"
+                ]
+            )
+
+            alert = get_alert_by_id(
+                alert_id
+            )
+
+            # =================================================
+            # UNKNOWN / REMOVED ALERT CONFIGURATION
+            #
+            # Do not mark the win alert as sent.
+            #
+            # Leaving WINALERTSENT = 0 preserves the record
+            # for retry after the configuration is corrected.
+            # =================================================
+
+            if alert is None:
+
+                failed_count += 1
+
+                error_message = (
+                    f"Cannot send win alert for "
+                    f"{runner_name}: "
+                    f"unknown alert ID "
+                    f"{alert_id!r}."
+                )
+
+                print(
+                    f"WIN ALERT ERROR: "
+                    f"{error_message}"
+                )
+
+                send_dev_alert(
+                    source=(
+                        "RESULT MONITOR / "
+                        "WIN ALERT"
+                    ),
+                    message=(
+                        "Winning alerted runner could "
+                        "not be sent to Discord."
+                    ),
+                    error=error_message,
+                    severity="ERROR",
+                    details={
+                        "runner_id":
+                            runner_id,
+                        "runner_name":
+                            runner_name,
+                        "alert_id":
+                            alert_id,
+                    },
+                )
+
+                continue
+
+            try:
+                role_id = get_role_id(
+                    alert.role_env_name
+                )
+
+                message = (
+                    build_win_alert_message(
+                        pending_alert,
+                        alert
+                    )
+                )
+
+                send_discord_message(
+                    message,
+                    role_ids=[
+                        role_id
+                    ]
+                )
+
+                # ---------------------------------------------
+                # IMPORTANT:
+                #
+                # Mark as sent only AFTER Discord accepts the
+                # notification.
+                # ---------------------------------------------
+
+                mark_win_alert_as_sent(
+                    database,
+                    runner_id,
+                    alert_id
+                )
+
+                successful_count += 1
+
+                print(
+                    f"Win alert sent: "
+                    f"{runner_name} - "
+                    f"{alert.name}"
+                )
+
+            except Exception as error:
+
+                failed_count += 1
+
+                print(
+                    f"WIN ALERT ERROR: "
+                    f"{runner_name} - "
+                    f"{alert.name}: "
+                    f"{error}"
+                )
+
+                send_dev_alert(
+                    source=(
+                        "RESULT MONITOR / "
+                        "WIN ALERT"
+                    ),
+                    message=(
+                        "Winning alerted runner Discord "
+                        "notification failed."
+                    ),
+                    error=error,
+                    severity="ERROR",
+                    details={
+                        "runner_id":
+                            runner_id,
+                        "runner_name":
+                            runner_name,
+                        "alert_id":
+                            alert_id,
+                        "alert_name":
+                            alert.name,
+                        "alert_price":
+                            pending_alert.get(
+                                "alert_price"
+                            ),
+                    },
+                )
+
+        return (
+            successful_count,
+            failed_count
+        )
+
+    finally:
+        database.close()
 
 
 def build_race_url(
@@ -202,10 +489,6 @@ def race_is_ready_for_result_check(
 
     runner = alerted_runners[0]
 
-    # ========================================================
-    # PRIMARY RULE — USE RACESTART WHEN AVAILABLE
-    # ========================================================
-
     race_start = parse_runner_race_start(
         runner
     )
@@ -220,10 +503,6 @@ def race_is_ready_for_result_check(
         )
 
         return now >= result_check_time
-
-    # ========================================================
-    # HISTORICAL FALLBACK
-    # ========================================================
 
     meeting_date = parse_runner_meeting_date(
         runner
@@ -256,29 +535,6 @@ def results_have_fixed_odds_status(
     """
     Return True only when every parsed result has enough
     settlement information for final classification.
-
-    NORMAL RESULT:
-
-        fixed_odds_paid must be True or False.
-
-    SCRATCHED RESULT:
-
-        finish_position = 100
-
-        Fixed Odds dividend status is irrelevant because
-        the runner did not participate.
-
-    This means a SCR record remains usable even though
-    fixed_odds_paid will normally be False.
-
-    The legacy flattened-text fallback contains:
-
-        fixed_odds_paid = None
-
-    for ordinary finishing positions, so those results are
-    not sufficient for final classification.
-
-    Tote is ignored completely.
     """
 
     if not results:
@@ -302,12 +558,6 @@ def results_have_fixed_odds_status(
             ValueError
         ):
             return False
-
-        # ----------------------------------------------------
-        # SCRATCHED RESULT
-        #
-        # No Fixed Odds settlement is required.
-        # ----------------------------------------------------
 
         if (
             finish_position
@@ -333,29 +583,7 @@ def get_results_with_isolated_sessions(
     """
     Retrieve official race results using completely
     separate browser sessions for normal TAB and TAB Form.
-
-    Fixed Odds settlement information is mandatory for
-    ordinary results.
-
-    SCRATCHED results are accepted as:
-
-        FINISHPOSITION = 100
-
-    without requiring a Fixed Odds dividend.
-
-    If the normal TAB page returns finishing positions but
-    Fixed Odds settlement status is unknown, that result is
-    NOT accepted.
-
-    TAB Form is then attempted in a fresh BrowserSession.
-
-    This preserves the browser-isolation behaviour proven
-    necessary for TAB Form historical pages.
     """
-
-    # ========================================================
-    # ATTEMPT 1 — NORMAL TAB
-    # ========================================================
 
     normal_session = BrowserSession()
 
@@ -409,22 +637,12 @@ def get_results_with_isolated_sessions(
     finally:
         normal_session.close()
 
-    # ========================================================
-    # BUILD TAB FORM URL
-    # ========================================================
-
     form_url = build_form_url(
         race_url
     )
 
     if form_url is None:
         return []
-
-    # ========================================================
-    # ATTEMPT 2 — TAB FORM
-    #
-    # Completely separate BrowserSession.
-    # ========================================================
 
     form_session = BrowserSession()
 
@@ -487,56 +705,11 @@ def process_race_results(
 ) -> tuple[bool, int]:
     """
     Process the official Fixed Odds result for one race.
-
-    Returns:
-
-        (True, resolved_runner_count)
-
-            At least one usable official result was
-            published with known settlement / scratch
-            status and alerted runners were processed.
-
-        (False, 0)
-
-            No usable result was available.
-
-    FINAL CLASSIFICATION:
-
-        Runner explicitly marked SCR:
-            FINISHPOSITION = 100
-            -> SCR
-
-        Runner listed 1st
-        AND Fixed Odds dividend paid:
-            FINISHPOSITION = 1
-            -> Win
-
-        Runner listed 2nd or lower
-        AND Fixed Odds dividend paid:
-            FINISHPOSITION = exact position
-            -> Place
-
-        Runner explicitly listed
-        BUT no Fixed Odds dividend paid:
-            FINISHPOSITION = 99
-            -> Did not Place
-
-        Runner absent from published result rows:
-            FINISHPOSITION = 99
-            -> Did not Place
-
-        SCR takes priority over Fixed Odds settlement.
-
-        Tote is ignored completely.
     """
 
     results = get_results_with_isolated_sessions(
         race_url
     )
-
-    # ========================================================
-    # NO USABLE RESULT YET
-    # ========================================================
 
     if not results:
         print(
@@ -545,10 +718,6 @@ def process_race_results(
         )
 
         return False, 0
-
-    # ========================================================
-    # BUILD PUBLISHED RESULT LOOKUP
-    # ========================================================
 
     published_results = {}
 
@@ -607,13 +776,6 @@ def process_race_results(
         ):
             continue
 
-        # ----------------------------------------------------
-        # FINISHPOSITION 100 IS AUTHORITATIVE.
-        #
-        # Also preserve an explicit scratched=True flag if
-        # result_scraper.py provides one.
-        # ----------------------------------------------------
-
         is_scratched = (
             finish_position
             == SCRATCHED_POSITION
@@ -649,10 +811,6 @@ def process_race_results(
                 is_scratched,
         }
 
-    # ========================================================
-    # SAFETY CHECK
-    # ========================================================
-
     if not published_results:
         print(
             "Official result data was returned, "
@@ -672,10 +830,6 @@ def process_race_results(
         f"runner(s) with known settlement "
         f"or scratch status."
     )
-
-    # ========================================================
-    # SAVE RESULTS
-    # ========================================================
 
     database = connect_database()
 
@@ -711,12 +865,6 @@ def process_race_results(
                     runner_number
                 )
             )
-
-            # =================================================
-            # RUNNER NOT LISTED IN OFFICIAL RESULT ROWS
-            #
-            # Did not Place.
-            # =================================================
 
             if published_result is None:
 
@@ -765,25 +913,6 @@ def process_race_results(
                 ]
             )
 
-            # =================================================
-            # SCRATCHED
-            #
-            # THIS MUST BE CHECKED BEFORE:
-            #
-            #     if not fixed_odds_paid
-            #
-            # because a scratched runner naturally has no
-            # Fixed Odds dividend.
-            #
-            # SCR is always:
-            #
-            #     FINISHPOSITION = 100
-            #
-            # save_finish_position() also marks:
-            #
-            #     RESULTCHECKED = 1
-            # =================================================
-
             if (
                 scratched
                 or finish_position
@@ -809,19 +938,6 @@ def process_race_results(
 
                 continue
 
-            # =================================================
-            # LISTED BUT NO FIXED ODDS DIVIDEND
-            #
-            # Example:
-            #
-            #     4th GOLD CARD
-            #
-            # Tote may show a dividend elsewhere,
-            # but Fixed Odds result cell is blank.
-            #
-            #     -> DID NOT PLACE
-            # =================================================
-
             if not fixed_odds_paid:
 
                 save_finish_position(
@@ -844,16 +960,6 @@ def process_race_results(
                 )
 
                 continue
-
-            # =================================================
-            # FIXED ODDS DIVIDEND PAID
-            #
-            # 1st:
-            #     WIN
-            #
-            # 2nd+:
-            #     PLACE
-            # =================================================
 
             save_finish_position(
                 database,
@@ -909,13 +1015,7 @@ def process_race_results(
 
 def get_unresolved_summary() -> tuple[int, int]:
     """
-    Return:
-
-        unresolved_race_count,
-        unresolved_runner_count
-
-    based on ALERT_HISTORY records where
-    RESULTCHECKED = 0.
+    Return unresolved race and runner counts.
     """
 
     database = connect_database()
@@ -965,18 +1065,12 @@ def get_unresolved_summary() -> tuple[int, int]:
 
 def check_unprocessed_results() -> None:
     """
-    Find alerted runners whose results have not yet
-    been processed.
+    Process unresolved race results and then independently
+    process the secondary winning-alert queue.
 
-    Runners are grouped by race so TAB is only visited
-    once for each race.
-
-    Prints a summary showing:
-
-        races processed this run
-        runners resolved this run
-        unresolved races remaining
-        unresolved runners remaining
+    Win-alert delivery is deliberately independent from
+    result discovery so a Discord failure can be retried
+    even after RESULTCHECKED has become 1.
     """
 
     database = connect_database()
@@ -995,198 +1089,173 @@ def check_unprocessed_results() -> None:
     finally:
         database.close()
 
-    if not unchecked_runners:
-        print()
-        print(
-            "No unresolved alerted results."
-        )
-
-        print()
-        print(
-            "RESULT MONITOR SUMMARY"
-        )
-        print(
-            "----------------------"
-        )
-        print(
-            "Processed races: 0"
-        )
-        print(
-            "Resolved runners: 0"
-        )
-        print(
-            "Unresolved races: 0"
-        )
-        print(
-            "Unresolved runners: 0"
-        )
-
-        return
-
-    # ========================================================
-    # GROUP ALERTED RUNNERS BY RACE
-    # ========================================================
-
-    races = defaultdict(
-        list
-    )
-
-    for runner in unchecked_runners:
-
-        race_key = (
-            runner["meeting_date"],
-            runner["meeting_name"],
-            runner["venue_code"],
-            runner["race_number"]
-        )
-
-        races[
-            race_key
-        ].append(
-            runner
-        )
-
-    initial_unresolved_races = len(
-        races
-    )
-
-    initial_unresolved_runners = len(
-        unchecked_runners
-    )
-
-    print()
-    print(
-        "RESULT MONITOR START"
-    )
-    print(
-        "--------------------"
-    )
-
-    print(
-        f"Unresolved races: "
-        f"{initial_unresolved_races}"
-    )
-
-    print(
-        f"Unresolved runners: "
-        f"{initial_unresolved_runners}"
-    )
-
-    now = datetime.now()
-
     races_checked = 0
     runners_resolved = 0
     races_skipped_missing_meeting = 0
     races_not_ready = 0
 
-    # ========================================================
-    # PROCESS ELIGIBLE RACES
-    # ========================================================
+    if not unchecked_runners:
 
-    for (
-        meeting_date,
-        meeting_name,
-        venue_code,
-        race_number
-    ), alerted_runners in races.items():
+        print()
+        print(
+            "No unresolved alerted results."
+        )
 
-        # ----------------------------------------------------
-        # MISSING MEETING NAME
-        # ----------------------------------------------------
+    else:
 
-        if not meeting_name:
+        races = defaultdict(
+            list
+        )
 
-            races_skipped_missing_meeting += 1
+        for runner in unchecked_runners:
 
-            print()
-
-            print(
-                f"Skipping result: "
-                f"{venue_code} "
-                f"R{race_number}"
+            race_key = (
+                runner["meeting_date"],
+                runner["meeting_name"],
+                runner["venue_code"],
+                runner["race_number"]
             )
 
-            print(
-                "Reason: MEETINGNAME is missing "
-                "from RUNNERS."
+            races[
+                race_key
+            ].append(
+                runner
             )
 
-            for runner in alerted_runners:
+        initial_unresolved_races = len(
+            races
+        )
+
+        initial_unresolved_runners = len(
+            unchecked_runners
+        )
+
+        print()
+        print(
+            "RESULT MONITOR START"
+        )
+        print(
+            "--------------------"
+        )
+
+        print(
+            f"Unresolved races: "
+            f"{initial_unresolved_races}"
+        )
+
+        print(
+            f"Unresolved runners: "
+            f"{initial_unresolved_runners}"
+        )
+
+        now = datetime.now()
+
+        for (
+            meeting_date,
+            meeting_name,
+            venue_code,
+            race_number
+        ), alerted_runners in races.items():
+
+            if not meeting_name:
+
+                races_skipped_missing_meeting += 1
+
+                print()
+
                 print(
-                    f"  Unresolved runner: "
-                    f"#{runner['runner_number']} "
-                    f"{runner['runner_name']}"
+                    f"Skipping result: "
+                    f"{venue_code} "
+                    f"R{race_number}"
                 )
 
-            continue
+                print(
+                    "Reason: MEETINGNAME is missing "
+                    "from RUNNERS."
+                )
 
-        # ----------------------------------------------------
-        # RESULT-CHECK TIMING
-        # ----------------------------------------------------
+                for runner in alerted_runners:
+                    print(
+                        f"  Unresolved runner: "
+                        f"#{runner['runner_number']} "
+                        f"{runner['runner_name']}"
+                    )
 
-        if not race_is_ready_for_result_check(
-            alerted_runners,
-            now
-        ):
-            races_not_ready += 1
+                continue
+
+            if not race_is_ready_for_result_check(
+                alerted_runners,
+                now
+            ):
+                races_not_ready += 1
+
+                print()
+
+                print(
+                    f"Skipping result: "
+                    f"{meeting_name} "
+                    f"R{race_number}"
+                )
+
+                print(
+                    "Reason: race is not yet eligible "
+                    "for a result check."
+                )
+
+                continue
+
+            race_url = build_race_url(
+                meeting_date=meeting_date,
+                meeting_name=meeting_name,
+                venue_code=venue_code,
+                race_number=race_number
+            )
 
             print()
 
             print(
-                f"Skipping result: "
+                f"Checking result: "
                 f"{meeting_name} "
                 f"R{race_number}"
             )
 
-            print(
-                "Reason: race is not yet eligible "
-                "for a result check."
-            )
-
-            continue
-
-        race_url = build_race_url(
-            meeting_date=meeting_date,
-            meeting_name=meeting_name,
-            venue_code=venue_code,
-            race_number=race_number
-        )
-
-        print()
-
-        print(
-            f"Checking result: "
-            f"{meeting_name} "
-            f"R{race_number}"
-        )
-
-        (
-            result_found,
-            resolved_runner_count
-        ) = process_race_results(
-            race_url=race_url,
-            alerted_runners=alerted_runners
-        )
-
-        if result_found:
-            races_checked += 1
-
-            runners_resolved += (
+            (
+                result_found,
                 resolved_runner_count
+            ) = process_race_results(
+                race_url=race_url,
+                alerted_runners=alerted_runners
             )
 
+            if result_found:
+                races_checked += 1
+
+                runners_resolved += (
+                    resolved_runner_count
+                )
+
     # ========================================================
-    # FINAL UNRESOLVED STATE
+    # WIN ALERT DELIVERY
+    #
+    # Run independently of unresolved result processing.
+    #
+    # This means:
+    #
+    #     - newly resolved wins are sent immediately
+    #     - failed Discord sends retry on later cycles
+    #     - multiple original alert categories each receive
+    #       their own notification
     # ========================================================
+
+    (
+        win_alerts_sent,
+        win_alerts_failed
+    ) = send_pending_win_alerts()
 
     (
         unresolved_race_count,
         unresolved_runner_count
     ) = get_unresolved_summary()
-
-    # ========================================================
-    # SUMMARY
-    # ========================================================
 
     print()
     print(
@@ -1204,6 +1273,16 @@ def check_unprocessed_results() -> None:
     print(
         f"Resolved runners: "
         f"{runners_resolved}"
+    )
+
+    print(
+        f"Win alerts sent: "
+        f"{win_alerts_sent}"
+    )
+
+    print(
+        f"Win alerts failed: "
+        f"{win_alerts_failed}"
     )
 
     print(
